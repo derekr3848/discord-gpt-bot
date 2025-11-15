@@ -10,7 +10,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
 # Your Assistant ID from platform.openai.com/assistants
-ASSISTANT_ID = "YOUR_ASSISTANT_ID_HERE"   # <-- PUT YOUR ASSISTANT ID HERE
+ASSISTANT_ID = "asst_Fc3yRPdXjHUBlXNswxQ4q1TM"   # <-- PUT YOUR ASSISTANT ID HERE
 
 # -------------------------------
 # SETUP CLIENTS
