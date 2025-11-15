@@ -3,11 +3,7 @@ import discord
 from discord.ext import commands
 from openai import OpenAI
 import aiohttp
-import io
 
-# ----------------------------
-# CONFIG
-# ----------------------------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -20,33 +16,29 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="/", intents=intents)
 
-user_threads = {}       # maps discord user_id → OpenAI thread_id
-active_channels = {}    # maps channel_id → user_id
+user_threads = {}
+active_channels = {}
 
 
 # ----------------------------
-# MESSAGE CHUNKING FIX (IMPORTANT)
+# MESSAGE CHUNKING FIX
 # ----------------------------
 async def send_long_message(channel, text):
-    """Splits long messages so Discord doesn't reject them."""
     limit = 1900
-    chunks = [text[i:i + limit] for i in range(0, len(text), limit)]
-
-    for chunk in chunks:
-        await channel.send(chunk)
+    chunks = [text[i:i+limit] for i in range(0, len(text), limit)]
+    for c in chunks:
+        await channel.send(c)
 
 
 # ----------------------------
 # OPENAI HELPERS
 # ----------------------------
 def create_user_thread():
-    """Creates a new OpenAI thread for a user."""
     thread = client_openai.beta.threads.create()
     return thread.id
 
 
 def run_assistant(thread_id, user_input=None, file_id=None):
-    """Runs our assistant on a thread with text or audio."""
     messages = []
 
     if user_input:
@@ -56,7 +48,7 @@ def run_assistant(thread_id, user_input=None, file_id=None):
         messages.append({
             "role": "user",
             "content": [
-                {"type": "input_text", "text": "Analyze this sales or setting call."},
+                {"type": "input_text", "text": "Analyze this call."},
                 {"type": "input_audio", "audio_id": file_id}
             ]
         })
@@ -67,9 +59,9 @@ def run_assistant(thread_id, user_input=None, file_id=None):
         content=messages
     )
 
-    run = client_openai.beta.threads.runs.create_and_poll(
+    client_openai.beta.threads.runs.create_and_poll(
         thread_id=thread_id,
-        assistant_id=ASSISTANT_ID,
+        assistant_id=ASSISTANT_ID
     )
 
     msgs = client_openai.beta.threads.messages.list(thread_id=thread_id)
@@ -80,7 +72,6 @@ def run_assistant(thread_id, user_input=None, file_id=None):
 # AUDIO HANDLING
 # ----------------------------
 async def transcribe_audio(url):
-    """Downloads and transcribes Discord audio → returns transcript."""
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             data = await resp.read()
@@ -94,17 +85,15 @@ async def transcribe_audio(url):
 
 
 # ----------------------------
-# START COMMAND — CREATES USER'S PRIVATE THREAD
+# START COMMAND → MAKES PRIVATE THREAD
 # ----------------------------
 @bot.command()
 async def start(ctx):
     user = ctx.author
 
-    # Create OpenAI thread if new user
     if user.id not in user_threads:
         user_threads[user.id] = create_user_thread()
 
-    # Create a private thread for this user
     thread = await ctx.channel.create_thread(
         name=f"{user.name}-ai-chat",
         type=discord.ChannelType.private_thread
@@ -112,34 +101,35 @@ async def start(ctx):
 
     active_channels[thread.id] = user.id
 
-    await thread.send(
-        f"👋 Welcome **{user.name}**!\n\n"
-        f"This is your private AI channel.\n"
-        f"Just type normally — no commands required.\n\n"
-        f"🎯 I specialize in:\n"
-        f"- Sales call analysis\n"
-        f- Setter performance feedback\n"
-        f"- Meta ads + YouTube strategy\n"
-        f"- Organic + content marketing\n"
-        f"- Christian agency & coaching business scaling\n"
+    welcome_message = (
+        f"👋 **Welcome {user.name}!**\n\n"
+        f"This is your **private AI chat thread**.\n"
+        f"Just talk normally — no commands needed.\n\n"
+        f"### 🤖 I can help you with:\n"
+        f"- Sales call breakdowns\n"
+        f"- Setter call analysis\n"
+        f"- Meta ads strategy & audits\n"
+        f"- YouTube content planning\n"
+        f"- Organic content strategy\n"
+        f"- Full marketing support for Christian agency owners/coaches\n"
         f"- Image analysis\n"
-        f"- Audio / call analysis\n\n"
+        f"- Audio/call feedback\n\n"
         f"How can I help you today?"
     )
 
+    await thread.send(welcome_message)
+
 
 # ----------------------------
-# ON MESSAGE — Handles text, images, audio
+# MESSAGE HANDLING
 # ----------------------------
 @bot.event
 async def on_message(message):
-    # ignore bot messages
     if message.author.bot:
         return
 
     channel_id = message.channel.id
 
-    # Not an AI thread → allow commands
     if channel_id not in active_channels:
         await bot.process_commands(message)
         return
@@ -147,30 +137,22 @@ async def on_message(message):
     user_id = active_channels[channel_id]
     thread_id = user_threads[user_id]
 
-    # ----------------------------
-    # AUDIO FILES
-    # ----------------------------
+    # AUDIO messages
     if message.attachments:
-        attachment = message.attachments[0]
+        att = message.attachments[0]
+        if att.content_type and "audio" in att.content_type:
+            await message.channel.send("🎧 Transcribing audio...")
+            transcript = await transcribe_audio(att.url)
 
-        if attachment.content_type and "audio" in attachment.content_type:
-            await message.channel.send("🎧 Received audio. Transcribing...")
+            await message.channel.send("📄 Analyzing call...")
 
-            transcript = await transcribe_audio(attachment.url)
-
-            await message.channel.send("📄 Transcription complete. Analyzing...")
-
-            result = run_assistant(thread_id, user_input=transcript)
-
-            await send_long_message(message.channel, result)
+            reply = run_assistant(thread_id, user_input=transcript)
+            await send_long_message(message.channel, reply)
             return
 
-    # ----------------------------
-    # TEXT MESSAGE
-    # ----------------------------
-    user_text = message.content.strip()
-    if user_text:
-        reply = run_assistant(thread_id, user_input=user_text)
+    # TEXT messages
+    if message.content.strip():
+        reply = run_assistant(thread_id, user_input=message.content.strip())
         await send_long_message(message.channel, reply)
 
 
@@ -179,7 +161,7 @@ async def on_message(message):
 # ----------------------------
 @bot.event
 async def on_ready():
-    print(f"🤖 Bot ready — Logged in as {bot.user}")
+    print(f"🤖 Bot ready — logged in as {bot.user}")
 
 
 bot.run(DISCORD_TOKEN)
