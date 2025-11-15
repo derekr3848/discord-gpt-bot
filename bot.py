@@ -2,166 +2,133 @@ import os
 import discord
 from discord.ext import commands
 from openai import OpenAI
-import aiohttp
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# -----------------------------
+# ENVIRONMENT VARIABLES
+# -----------------------------
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")   # must match Railway variable
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+ASSISTANT_ID = os.getenv("asst_Fc3yRPdXjHUBlXNswxQ4q1TM")  # your assistant ID
 
-ASSISTANT_ID = "asst_Fc3yRPdXjHUBlXNswxQ4q1TM"
+if OPENAI_KEY is None:
+    raise ValueError("OPENAI_API_KEY is missing!")
+if DISCORD_TOKEN is None:
+    raise ValueError("DISCORD_BOT_TOKEN is missing!")
+if ASSISTANT_ID is None:
+    raise ValueError("ASSISTANT_ID is missing!")
 
-client_openai = OpenAI(api_key=OPENAI_API_KEY)
+# -----------------------------
+# OPENAI CLIENT
+# -----------------------------
+client_openai = OpenAI(api_key=OPENAI_KEY)
 
+# -----------------------------
+# DISCORD BOT SETUP
+# -----------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+
 bot = commands.Bot(command_prefix="/", intents=intents)
 
+# Stores:
+# user_id : { "discord_thread": thread_id, "openai_thread": thread_id }
 user_threads = {}
-active_channels = {}
 
-
-# ----------------------------
-# MESSAGE CHUNKING FIX
-# ----------------------------
-async def send_long_message(channel, text):
-    limit = 1900
-    chunks = [text[i:i+limit] for i in range(0, len(text), limit)]
-    for c in chunks:
-        await channel.send(c)
-
-
-# ----------------------------
-# OPENAI HELPERS
-# ----------------------------
-def create_user_thread():
-    thread = client_openai.beta.threads.create()
-    return thread.id
-
-
-def run_assistant(thread_id, user_input=None, file_id=None):
-    messages = []
-
-    if user_input:
-        messages.append({"role": "user", "content": user_input})
-
-    if file_id:
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": "Analyze this call."},
-                {"type": "input_audio", "audio_id": file_id}
-            ]
-        })
-
-    client_openai.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=messages
-    )
-
-    client_openai.beta.threads.runs.create_and_poll(
-        thread_id=thread_id,
-        assistant_id=ASSISTANT_ID
-    )
-
-    msgs = client_openai.beta.threads.messages.list(thread_id=thread_id)
-    return msgs.data[0].content[0].text.value
-
-
-# ----------------------------
-# AUDIO HANDLING
-# ----------------------------
-async def transcribe_audio(url):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.read()
-
-    transcript = client_openai.audio.transcriptions.create(
-        model="gpt-4o-mini-transcribe",
-        file=("audio.ogg", data)
-    )
-
-    return transcript.text
-
-
-# ----------------------------
-# START COMMAND → MAKES PRIVATE THREAD
-# ----------------------------
-@bot.command()
-async def start(ctx):
-    user = ctx.author
-
-    if user.id not in user_threads:
-        user_threads[user.id] = create_user_thread()
-
-    thread = await ctx.channel.create_thread(
-        name=f"{user.name}-ai-chat",
-        type=discord.ChannelType.private_thread
-    )
-
-    active_channels[thread.id] = user.id
-
-    welcome_message = (
-        f"👋 **Welcome {user.name}!**\n\n"
-        f"This is your **private AI chat thread**.\n"
-        f"Just talk normally — no commands needed.\n\n"
-        f"### 🤖 I can help you with:\n"
-        f"- Sales call breakdowns\n"
-        f"- Setter call analysis\n"
-        f"- Meta ads strategy & audits\n"
-        f"- YouTube content planning\n"
-        f"- Organic content strategy\n"
-        f"- Full marketing support for Christian agency owners/coaches\n"
-        f"- Image analysis\n"
-        f"- Audio/call feedback\n\n"
-        f"How can I help you today?"
-    )
-
-    await thread.send(welcome_message)
-
-
-# ----------------------------
-# MESSAGE HANDLING
-# ----------------------------
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    channel_id = message.channel.id
-
-    if channel_id not in active_channels:
-        await bot.process_commands(message)
-        return
-
-    user_id = active_channels[channel_id]
-    thread_id = user_threads[user_id]
-
-    # AUDIO messages
-    if message.attachments:
-        att = message.attachments[0]
-        if att.content_type and "audio" in att.content_type:
-            await message.channel.send("🎧 Transcribing audio...")
-            transcript = await transcribe_audio(att.url)
-
-            await message.channel.send("📄 Analyzing call...")
-
-            reply = run_assistant(thread_id, user_input=transcript)
-            await send_long_message(message.channel, reply)
-            return
-
-    # TEXT messages
-    if message.content.strip():
-        reply = run_assistant(thread_id, user_input=message.content.strip())
-        await send_long_message(message.channel, reply)
-
-
-# ----------------------------
+# -----------------------------
 # BOT READY
-# ----------------------------
+# -----------------------------
 @bot.event
 async def on_ready():
     print(f"🤖 Bot ready — logged in as {bot.user}")
+    print("Loaded user memory:", len(user_threads))
 
 
+# -----------------------------
+# START COMMAND
+# -----------------------------
+@bot.command()
+async def start(ctx):
+    """Creates a private AI conversation thread for the user."""
+
+    user_id = ctx.author.id
+
+    # If user already has a thread
+    if user_id in user_threads:
+        await ctx.reply("You already have an AI chat thread!")
+        return
+
+    # Create Discord private thread
+    thread = await ctx.channel.create_thread(
+        name=f"{ctx.author.name}-ai-chat",
+        type=discord.ChannelType.private_thread
+    )
+
+    # Create OpenAI assistant thread for this user
+    ai_thread = client_openai.beta.threads.create()
+
+    # Save memory
+    user_threads[user_id] = {
+        "discord_thread": thread.id,
+        "openai_thread": ai_thread.id
+    }
+
+    await thread.send(
+        f"👋 Hello {ctx.author.mention}! This is your personal AI chat. "
+        "Ask me anything — no commands needed inside this thread."
+    )
+
+
+# -----------------------------
+# MESSAGE HANDLER
+# -----------------------------
+@bot.event
+async def on_message(message):
+    """Handles user chat inside their private AI thread."""
+
+    # Ignore bot messages
+    if message.author.bot:
+        return
+
+    user_id = message.author.id
+
+    # Check if message is in the user's assigned private thread
+    if user_id in user_threads:
+        thread_info = user_threads[user_id]
+
+        if message.channel.id == thread_info["discord_thread"]:
+            # User sent message inside their AI thread
+            ai_thread_id = thread_info["openai_thread"]
+
+            # Send user message to OpenAI
+            client_openai.beta.threads.messages.create(
+                thread_id=ai_thread_id,
+                role="user",
+                content=message.content
+            )
+
+            # Run the assistant
+            run = client_openai.beta.threads.runs.create_and_poll(
+                thread_id=ai_thread_id,
+                assistant_id=ASSISTANT_ID
+            )
+
+            # Get assistant response
+            messages = client_openai.beta.threads.messages.list(
+                thread_id=ai_thread_id
+            )
+            reply = messages.data[0].content[0].text.value
+
+            # Discord replies must be under 2000 characters
+            if len(reply) > 1990:
+                reply = reply[:1990] + "..."
+
+            await message.channel.send(reply)
+
+    # VERY IMPORTANT — lets commands still work
+    await bot.process_commands(message)
+
+
+# -----------------------------
+# RUN THE BOT
+# -----------------------------
 bot.run(DISCORD_TOKEN)
