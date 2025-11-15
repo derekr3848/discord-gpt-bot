@@ -3,53 +3,53 @@ import discord
 from discord.ext import commands
 from openai import OpenAI
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# -------------------------------
+# ENV VARIABLES
+# -------------------------------
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
-# Initialize OpenAI client
-client_openai = OpenAI(api_key=OPENAI_API_KEY)
+# Your Assistant ID from platform.openai.com/assistants
+ASSISTANT_ID = "YOUR_ASSISTANT_ID_HERE"   # <-- PUT YOUR ASSISTANT ID HERE
 
-# Bot setup
+# -------------------------------
+# SETUP CLIENTS
+# -------------------------------
+client_openai = OpenAI(api_key=OPENAI_KEY)
+
 intents = discord.Intents.default()
-intents.message_content = True  # REQUIRED for reading messages
+intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
 
-
-# ------------------------------
-# Bot Ready
-# ------------------------------
+# -------------------------------
+# BOT READY EVENT
+# -------------------------------
 @bot.event
 async def on_ready():
     print(f"Bot is ready — Logged in as {bot.user}")
 
-
-# ------------------------------
-# !ask command
-# ------------------------------
-@bot.command()
+# -------------------------------
+# ASK COMMAND
+# -------------------------------
+@bot.command(name="ask")
 async def ask(ctx, *, prompt: str):
-    """Ask the AI a question."""
-    
-    # Show typing indicator
-    async with ctx.channel.typing():
-        try:
-            # Call OpenAI Responses API
-            response = client_openai.responses.create(
-                model="gpt-4.1-mini",
-                input=prompt
-            )
+    """Ask your OpenAI Assistant a question."""
+    await ctx.channel.typing()
 
-            answer = response.output_text
+    try:
+        # 1. Create a new assistant thread
+        thread = client_openai.beta.threads.create()
 
-        except Exception as e:
-            answer = f"Error: {e}"
+        # 2. Add user message
+        client_openai.beta.threads.messages.create(
+            thread_id=thread.id,
+            role="user",
+            content=prompt
+        )
 
-    # Reply to the user
-    await ctx.reply(answer)
-
-
-# ------------------------------
-# Run bot
-# ------------------------------
-bot.run(DISCORD_BOT_TOKEN)
+        # 3. Run the assistant
+        run = client_open_
