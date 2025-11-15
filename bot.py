@@ -24,7 +24,7 @@ async def on_ready():
 async def ask(ctx, *, query: str):
     """Ask the AI something using:  !ask <your question>"""
 
-    await ctx.channel.trigger_typing()
+    await ctx.channel.typing()
 
     # Call OpenAI Responses API (works in November 2025)
     response = client_openai.responses.create(
