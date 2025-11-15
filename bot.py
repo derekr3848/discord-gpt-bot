@@ -3,38 +3,53 @@ import discord
 from discord.ext import commands
 from openai import OpenAI
 
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-client_openai = OpenAI(api_key=OPENAI_KEY)
+# Initialize OpenAI client
+client_openai = OpenAI(api_key=OPENAI_API_KEY)
 
+# Bot setup
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True  # REQUIRED for reading messages
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+
+# ------------------------------
+# Bot Ready
+# ------------------------------
 @bot.event
 async def on_ready():
     print(f"Bot is ready — Logged in as {bot.user}")
 
-# ---------------------------
-#     !ask COMMAND
-# ---------------------------
+
+# ------------------------------
+# !ask command
+# ------------------------------
 @bot.command()
-async def ask(ctx, *, query: str):
-    """Ask the AI something using:  !ask <your question>"""
+async def ask(ctx, *, prompt: str):
+    """Ask the AI a question."""
+    
+    # Show typing indicator
+    async with ctx.channel.typing():
+        try:
+            # Call OpenAI Responses API
+            response = client_openai.responses.create(
+                model="gpt-4.1-mini",
+                input=prompt
+            )
 
-    await ctx.channel.typing()
+            answer = response.output_text
 
-    # Call OpenAI Responses API (works in November 2025)
-    response = client_openai.responses.create(
-        model="gpt-4.1-mini",
-        input=query,
-    )
+        except Exception as e:
+            answer = f"Error: {e}"
 
-    ai_reply = response.output_text
+    # Reply to the user
+    await ctx.reply(answer)
 
-    await ctx.reply(ai_reply)
 
-# ---------------------------
-bot.run(DISCORD_TOKEN)
+# ------------------------------
+# Run bot
+# ------------------------------
+bot.run(DISCORD_BOT_TOKEN)
