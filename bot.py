@@ -8,7 +8,7 @@ from openai import OpenAI
 # -----------------------------
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")   # must match Railway variable
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID = os.getenv("asst_Fc3yRPdXjHUBlXNswxQ4q1TM")  # your assistant ID
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")  # your assistant ID
 
 if OPENAI_KEY is None:
     raise ValueError("OPENAI_API_KEY is missing!")
