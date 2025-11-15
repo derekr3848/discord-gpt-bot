@@ -3,39 +3,38 @@ import discord
 from discord.ext import commands
 from openai import OpenAI
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
-client_openai = OpenAI(api_key=OPENAI_API_KEY)
+client_openai = OpenAI(api_key=OPENAI_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
 @bot.event
 async def on_ready():
     print(f"Bot is ready — Logged in as {bot.user}")
 
-
+# ---------------------------
+#     !ask COMMAND
+# ---------------------------
 @bot.command()
-async def ai(ctx, *, message: str):
-    """Ask the AI something"""
+async def ask(ctx, *, query: str):
+    """Ask the AI something using:  !ask <your question>"""
+
     await ctx.channel.trigger_typing()
 
-    try:
-        response = client_openai.responses.create(
-            model="gpt-4o-mini",
-            input=message
-        )
+    # Call OpenAI Responses API (works in November 2025)
+    response = client_openai.responses.create(
+        model="gpt-4.1-mini",
+        input=query,
+    )
 
-        reply = response.output_text
-        await ctx.reply(reply)
+    ai_reply = response.output_text
 
-    except Exception as e:
-        await ctx.reply(f"Error: {e}")
-        print(e)
+    await ctx.reply(ai_reply)
 
-
-bot.run(DISCORD_BOT_TOKEN)
+# ---------------------------
+bot.run(DISCORD_TOKEN)
