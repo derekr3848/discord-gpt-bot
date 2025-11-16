@@ -1,0 +1,233 @@
+# asana_integration.py
+
+import os
+import json
+from datetime import datetime, date, timedelta, timezone
+from typing import Dict, List, Optional
+
+import aiohttp
+
+ASANA_ACCESS_TOKEN = os.getenv("ASANA_ACCESS_TOKEN")
+ASANA_TEMPLATE_GID = os.getenv("ASANA_TEMPLATE_GID")
+
+ASANA_API_BASE = "https://app.asana.com/api/1.0"
+
+# Where we store user -> project mapping on disk so it's not lost on restart
+ASANA_MAPPING_FILE = "asana_user_projects.json"
+
+
+def _load_mapping() -> Dict[str, str]:
+    try:
+        with open(ASANA_MAPPING_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def _save_mapping(mapping: Dict[str, str]) -> None:
+    try:
+        with open(ASANA_MAPPING_FILE, "w") as f:
+            json.dump(mapping, f)
+    except Exception:
+        # Don't crash the bot if saving fails
+        pass
+
+
+class AsanaClient:
+    def __init__(self) -> None:
+        if not ASANA_ACCESS_TOKEN:
+            raise RuntimeError("ASANA_ACCESS_TOKEN is not set")
+        if not ASANA_TEMPLATE_GID:
+            raise RuntimeError("ASANA_TEMPLATE_GID is not set")
+
+        self.token = ASANA_ACCESS_TOKEN
+        self.template_gid = ASANA_TEMPLATE_GID
+        self._user_projects: Dict[str, str] = _load_mapping()
+
+    # ---------- low-level HTTP ----------
+
+    async def _request(self, method: str, path: str, session: aiohttp.ClientSession, **kwargs):
+        headers = kwargs.pop("headers", {})
+        headers["Authorization"] = f"Bearer {self.token}"
+        headers["Content-Type"] = "application/json"
+
+        url = f"{ASANA_API_BASE}{path}"
+        async with session.request(method, url, headers=headers, **kwargs) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"Asana API error {resp.status}: {text}")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return {}
+
+    # ---------- project template instantiation ----------
+
+    async def create_project_for_user(
+        self,
+        session: aiohttp.ClientSession,
+        discord_user_id: int,
+        client_name: str,
+    ) -> str:
+        """
+        Instantiate a project from the template for this Discord user.
+        Returns the new project gid.
+        """
+        user_key = str(discord_user_id)
+        # If we already created one before, reuse it
+        if user_key in self._user_projects:
+            return self._user_projects[user_key]
+
+        project_name = f"{client_name} – 6 Month Scale Plan"
+
+        payload = {
+            "data": {
+                "name": project_name,
+                # NOTE: You *can* add requested_dates / requested_roles here later
+                # to drive start/due dates from a "program start" date.
+            }
+        }
+
+        # Instantiate project from project template
+        # POST /project_templates/{project_template_gid}/instantiateProject
+        data = await self._request(
+            "POST",
+            f"/project_templates/{self.template_gid}/instantiateProject",
+            session,
+            json=payload,
+        )
+
+        # Asana returns a "job" – we grab the new project GID from it
+        # Format is usually: { "data": { "new_project": { "gid": "...", ... }, ... } }
+        job = data.get("data", {})
+        new_project = job.get("new_project") or job.get("project") or {}
+        project_gid = new_project.get("gid")
+        if not project_gid:
+            # Fallback: Asana might now return job only; in that case you'd have to poll.
+            # For now, we just raise so you see the response in logs.
+            raise RuntimeError(f"Could not find new project gid in Asana response: {data}")
+
+        self._user_projects[user_key] = project_gid
+        _save_mapping(self._user_projects)
+        return project_gid
+
+    def get_project_for_user(self, discord_user_id: int) -> Optional[str]:
+        return self._user_projects.get(str(discord_user_id))
+
+    # ---------- task reading & agenda building ----------
+
+    async def _get_project_tasks(
+        self,
+        session: aiohttp.ClientSession,
+        project_gid: str,
+    ) -> List[dict]:
+        """
+        Get tasks for a project with important fields.
+        """
+        params = {
+            "project": project_gid,
+            "opt_fields": (
+                "name,completed,due_on,permalink_url,"
+                "memberships.section.name"
+            ),
+            "limit": 100,
+        }
+
+        data = await self._request("GET", "/tasks", session, params=params)
+        return data.get("data", [])
+
+    @staticmethod
+    def _parse_due_on(due_on: Optional[str]) -> Optional[date]:
+        if not due_on:
+            return None
+        try:
+            return datetime.strptime(due_on, "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    async def build_daily_agenda(
+        self,
+        session: aiohttp.ClientSession,
+        discord_user_id: int,
+    ) -> Optional[str]:
+        project_gid = self.get_project_for_user(discord_user_id)
+        if not project_gid:
+            return None
+
+        tasks = await self._get_project_tasks(session, project_gid)
+
+        today = date.today()
+        week_ahead = today + timedelta(days=7)
+
+        due_today = []
+        overdue = []
+        upcoming = []
+
+        for t in tasks:
+            if t.get("completed"):
+                continue
+
+            due_on = self._parse_due_on(t.get("due_on"))
+            name = t.get("name", "Untitled task")
+            url = t.get("permalink_url")
+            memberships = t.get("memberships") or []
+            section_name = None
+            if memberships:
+                section = memberships[0].get("section") or {}
+                section_name = section.get("name")
+
+            entry = {
+                "name": name,
+                "url": url,
+                "due_on": due_on,
+                "section": section_name,
+            }
+
+            if due_on is None:
+                # No due date – treat as upcoming backlog but not in "today"
+                continue
+            elif due_on < today:
+                overdue.append(entry)
+            elif due_on == today:
+                due_today.append(entry)
+            elif today < due_on <= week_ahead:
+                upcoming.append(entry)
+
+        if not due_today and not overdue and not upcoming:
+            return None
+
+        lines = ["**📅 Your Asana Agenda For Today**\n"]
+
+        if due_today:
+            lines.append("**✅ Due Today:**")
+            for e in due_today:
+                sec = f" ({e['section']})" if e["section"] else ""
+                link = f" – [Open in Asana]({e['url']})" if e["url"] else ""
+                lines.append(f"- {e['name']}{sec}{link}")
+            lines.append("")
+
+        if overdue:
+            lines.append("**⚠️ Overdue:**")
+            for e in overdue:
+                sec = f" ({e['section']})" if e["section"] else ""
+                when = f" (was due {e['due_on'].isoformat()})" if e["due_on"] else ""
+                link = f" – [Open in Asana]({e['url']})" if e["url"] else ""
+                lines.append(f"- {e['name']}{sec}{when}{link}")
+            lines.append("")
+
+        if upcoming:
+            lines.append("**📆 Coming Up (next 7 days):**")
+            for e in upcoming:
+                sec = f" ({e['section']})" if e["section"] else ""
+                when = f" (due {e['due_on'].isoformat()})" if e["due_on"] else ""
+                link = f" – [Open in Asana]({e['url']})" if e["url"] else ""
+                lines.append(f"- {e['name']}{sec}{when}{link}")
+            lines.append("")
+
+        lines.append(
+            "_Mark tasks complete in Asana or tell me here when you finish something and I'll help you decide what's next._"
+        )
+
+        return "\n".join(lines)
