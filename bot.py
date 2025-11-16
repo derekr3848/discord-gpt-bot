@@ -679,30 +679,37 @@ async def handle_onboarding_message(
 # --------------------------------------------------
 async def get_or_create_discord_thread(ctx: commands.Context) -> discord.Thread:
     """
-    Each user gets one private thread per server for coaching chat.
+    Create or get a simple thread (compatible with your discord.py version).
     """
     user = ctx.author
     key = rk_discord_thread(user.id)
     existing = await redis_client.get(key)
+
+    # If thread exists already, return it
     if existing:
         thread = ctx.guild.get_thread(int(existing))
         if isinstance(thread, discord.Thread):
             return thread
 
-    # create new private thread off the current channel
-    base_msg = await ctx.send(
-        f"{user.mention} setting up your private coaching thread…"
-    )
+    # Create thread using ONLY supported arguments
+    base_msg = await ctx.send(f"{user.mention} setting up your coaching thread…")
+
     thread = await base_msg.create_thread(
         name=f"{user.display_name} – Coaching",
-        type=discord.ChannelType.private_thread,
-        invitable=False,
+        auto_archive_duration=10080  # 7 days
     )
-    await thread.add_user(user)
+
+    # Try to add the user to the thread
+    try:
+        await thread.add_user(user)
+    except Exception:
+        pass
 
     await redis_client.set(key, str(thread.id))
     await redis_client.set(rk_thread_owner(thread.id), str(user.id))
+
     return thread
+
 
 
 async def get_thread_owner(thread: discord.Thread) -> Optional[int]:
