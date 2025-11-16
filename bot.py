@@ -4,7 +4,8 @@ import json
 import base64
 import logging
 import datetime as dt
-from typing import Optional, Dict, Any, Tuple
+import asyncio  # needed for TimeoutError and other async helpers
+from typing import Optional, Dict, Any
 
 import aiohttp
 import discord
@@ -83,26 +84,55 @@ def today_str_cst() -> str:
 
 async def call_openai_assistant(messages: list[dict]) -> str:
     """
-    Use the Responses API with your existing Assistant (knowledge bank, tools, etc).
-    We also pass a short "memory" string from Redis as extra system context.
+    Use your dashboard Assistant (OPENAI_ASSISTANT_ID) via Assistants v2 Threads API.
+
+    We take the list of messages (system/user), flatten them into a single
+    conversation text, create a thread, run the Assistant, and return the reply.
     """
     try:
-        # Combine memory into system message if present
-        # messages is already [{role, content}, ...] with user/system msgs
-        response = client_openai.responses.create(
-            model="gpt-4.1-mini",
-            assistant_id=OPENAI_ASSISTANT_ID,
-            input=messages,
+        # Flatten messages into a single content string
+        parts: list[str] = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            parts.append(f"{role.upper()}:\n{content}")
+        combined_content = "\n\n".join(parts)
+
+        # 1) Create a temporary thread
+        thread = client_openai.beta.threads.create()
+
+        # 2) Add the message to the thread
+        client_openai.beta.threads.messages.create(
+            thread_id=thread.id,
+            role="user",
+            content=combined_content,
         )
-        # Responses API: first output_text item
-        for out in response.output:
-            if out.type == "message":
-                for c in out.message.content:
-                    if c.type == "output_text":
-                        return c.output_text
+
+        # 3) Run the Assistant on that thread
+        run = client_openai.beta.threads.runs.create_and_poll(
+            thread_id=thread.id,
+            assistant_id=OPENAI_ASSISTANT_ID,
+        )
+
+        # 4) Get the latest Assistant message from the thread
+        messages_list = client_openai.beta.threads.messages.list(
+            thread_id=thread.id,
+            order="desc",
+            limit=1,
+        )
+
+        for msg in messages_list.data:
+            chunks: list[str] = []
+            for c in msg.content:
+                # For text blocks
+                if getattr(c, "type", None) == "text":
+                    chunks.append(c.text.value)
+            if chunks:
+                return "\n".join(chunks)
+
         return "I had trouble generating a response, please try again."
     except Exception as e:
-        log.exception("Error calling OpenAI Responses API")
+        log.exception("Error calling OpenAI Assistant via Threads API")
         return f"⚠️ Error talking to the AI: `{e}`"
 
 
@@ -121,8 +151,10 @@ async def summarize_and_update_memory(user_id: int, new_message: str, ai_reply: 
         "Return ONLY the updated summary."
     )
     summary = await call_openai_assistant(
-        [{"role": "system", "content": "Update the client summary based on the conversation."},
-         {"role": "user", "content": prompt}]
+        [
+            {"role": "system", "content": "Update the client summary based on the conversation."},
+            {"role": "user", "content": prompt},
+        ]
     )
     await redis_client.set(key, summary)
 
@@ -133,12 +165,10 @@ async def transcribe_audio(discord_attachment: discord.Attachment) -> Optional[s
         buf = io.BytesIO()
         await discord_attachment.save(buf)
         buf.seek(0)
-        # Use new audio transcription endpoint
         transcript = client_openai.audio.transcriptions.create(
             model="gpt-4o-mini-transcribe",
             file=("audio.webm", buf, discord_attachment.content_type or "audio/webm"),
         )
-        # transcript.text for new API
         return getattr(transcript, "text", None)
     except Exception as e:
         log.exception("Error transcribing audio")
@@ -152,7 +182,8 @@ async def analyze_call_transcript(transcript: str) -> str:
         "You are given a full transcript of a sales or setter call.\n\n"
         "1) Give a tight summary (3-7 bullet points).\n"
         "2) Score the caller on a 0-10 scale for:\n"
-        "   - Discovery\n   - Qualification\n   - Objection handling\n   - Call control\n   - Closing\n"
+        "   - Discovery\n   - Qualification\n   - Objection handling\n"
+        "   - Call control\n   - Closing\n"
         "3) List specific ACTION items they should do differently next time.\n"
         "4) Tag red-flags using ONLY these labels, if present:\n"
         "   💸 Budget flags\n"
@@ -219,7 +250,6 @@ async def asana_duplicate_project_for_user(user_id: int, email: str, user_name: 
 
     project_name = f"{user_name} – Coach AI Program"
 
-    # Only allowed values from the error message list
     payload = {
         "data": {
             "name": project_name,
@@ -231,8 +261,7 @@ async def asana_duplicate_project_for_user(user_id: int, email: str, user_name: 
                 "task_subtasks",
                 "task_notes",
             ],
-            # IMPORTANT: no 'schedule_dates' field here to avoid
-            # "schedule_dates: Value is not an object" 400 error.
+            # IMPORTANT: no 'schedule_dates' field here to avoid the 400 error.
         }
     }
 
@@ -248,8 +277,6 @@ async def asana_duplicate_project_for_user(user_id: int, email: str, user_name: 
         log.exception("Error talking to Asana")
         return None
 
-    # Asana's duplicate endpoint returns a job; eventually a new project is created.
-    # For simplicity we try to pull 'new_project' if present, else bail out
     try:
         new_project = data.get("data", {}).get("new_project")
         if new_project and "gid" in new_project:
@@ -302,8 +329,8 @@ async def get_metrics(user_id: int) -> Dict[str, Any]:
 
 async def get_or_create_private_thread(ctx: commands.Context) -> discord.Thread:
     """
-    Each user gets exactly one private 'Derek AI – <name>' thread inside the channel where they used !start.
-    We'll remember thread_id in Redis so we don't recreate.
+    Each user gets exactly one private 'AI – <name>' thread inside the channel
+    where they used !start. We'll remember thread_id in Redis so we don't recreate.
     """
     key = k_user_thread(ctx.author.id)
     thread_id = await redis_client.get(key)
@@ -517,7 +544,6 @@ async def resetmemory_command(ctx: commands.Context):
     """Soft reset: clear your AI memory & metrics but keep Asana link."""
     await redis_client.delete(k_user_memory(ctx.author.id))
     await redis_client.delete(k_user_metrics(ctx.author.id))
-    # keep meta + Asana
     await ctx.send("🧼 Cleared your AI memory & metrics. We kept your onboarding + Asana.")
 
 
@@ -583,7 +609,6 @@ async def fullreset_command(ctx: commands.Context):
 
     target = msg.mentions[0]
 
-    # Ask for confirmation
     await ctx.send(
         f"⚠️ You are about to ERASE **ALL DATA** for **{target.mention}**.\n"
         "This includes:\n"
@@ -604,7 +629,6 @@ async def fullreset_command(ctx: commands.Context):
         await ctx.send("❌ Full reset cancelled.")
         return
 
-    # Perform full reset
     uid = target.id
     meta = await get_user_meta(uid)
     asana_raw = await redis_client.get(k_user_asana(uid))
@@ -619,7 +643,6 @@ async def fullreset_command(ctx: commands.Context):
 
     await ctx.send(f"🧨 **{target.mention} has been fully reset.**")
 
-    # DM Derek the audit
     owner = bot.get_user(int(OWNER_DISCORD_ID))
     if owner:
         try:
@@ -631,7 +654,6 @@ async def fullreset_command(ctx: commands.Context):
             )
         except Exception:
             log.exception("Failed to DM owner audit log")
-
 
 
 @bot.command(name="analyzecall")
@@ -655,11 +677,9 @@ async def analyzecall_command(ctx: commands.Context):
 
     analysis = await analyze_call_transcript(transcript)
 
-    # Discord has a 2000 char limit
     if len(analysis) <= 2000:
         await ctx.send(analysis)
     else:
-        # send as file
         buf = io.StringIO(analysis)
         file = discord.File(buf, filename="call-analysis.txt")
         await ctx.send("The analysis was long, so I put it in a file:", file=file)
@@ -674,10 +694,9 @@ async def analyzecall_command(ctx: commands.Context):
 async def daily_checkins():
     """
     Every 10 minutes, check if it's ~8am CST and send a check-in to each onboarded user,
-    once per day. (We just use date string tracking so it's simple.)
+    once per day.
     """
     now_utc = dt.datetime.utcnow()
-    # CST = UTC-6 (approx; we don't handle DST precisely here)
     hour_cst = (now_utc.hour - 6) % 24
 
     if hour_cst != 8:
@@ -685,8 +704,6 @@ async def daily_checkins():
 
     today = now_utc.date().isoformat()
 
-    # We don't have an easy way to list all users from Redis, so we rely on a
-    # set of "known users" stored under a special key.
     known_key = "known_users"
     user_ids = await redis_client.smembers(known_key)
     if not user_ids:
@@ -696,7 +713,7 @@ async def daily_checkins():
         uid = int(uid_str)
         last = await redis_client.get(k_daily_checkin_date(uid))
         if last == today:
-            continue  # already sent
+            continue
 
         thread_id = await redis_client.get(k_user_thread(uid))
         if not thread_id:
@@ -727,13 +744,11 @@ async def daily_checkins():
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Let commands process first
     await bot.process_commands(message)
 
     if message.author.bot:
         return
 
-    # Only auto-respond inside the user's private AI thread
     thread_key = k_user_thread(message.author.id)
     thread_id = await redis_client.get(thread_key)
     if not thread_id:
@@ -741,13 +756,11 @@ async def on_message(message: discord.Message):
     if str(message.channel.id) != str(thread_id):
         return
 
-    # Ignore messages that are pure commands
     if message.content.startswith("!"):
         return
 
     await redis_client.sadd("known_users", str(message.author.id))
 
-    # Check if this is an audio message (normal Q&A, not call review)
     if message.attachments:
         audio = message.attachments[0]
         if audio.content_type and audio.content_type.startswith("audio"):
@@ -757,7 +770,6 @@ async def on_message(message: discord.Message):
                 await message.channel.send("❌ I couldn't transcribe that. Try again with a clearer recording.")
                 return
             reply = await coach_answer(message.author.id, transcript)
-            # Split if too long
             if len(reply) <= 2000:
                 await message.channel.send(reply)
             else:
@@ -766,7 +778,6 @@ async def on_message(message: discord.Message):
             await inc_metric(message.author.id, "audio_minutes_qna", 2)
             return
 
-    # Normal text question
     reply = await coach_answer(message.author.id, message.content)
     if len(reply) <= 2000:
         await message.channel.send(reply)
