@@ -3,13 +3,12 @@ import io
 import json
 import base64
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, time
 
 import discord
 from discord.ext import commands
 from discord.ext import tasks
 import aiohttp
-from datetime import time, datetime, timezone
 
 from asana_integration import AsanaClient
 
@@ -51,22 +50,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-asana_client = None
-
-@bot.event
-async def on_ready():
-    global asana_client
-    if asana_client is None:
-        try:
-            asana_client = AsanaClient()
-            print("AsanaClient initialized")
-        except Exception as e:
-            print(f"AsanaClient not initialized: {e}")
-
-    if not daily_asana_checkin.is_running():
-        daily_asana_checkin.start()
-
-    print(f"Bot logged in as {bot.user}")
+asana_client: AsanaClient | None = None
 
 
 # ========= REDIS HELPERS =========
@@ -363,6 +347,19 @@ Return a response formatted for Discord, under ~1500 characters.
 
 @bot.event
 async def on_ready():
+    global asana_client
+    # init Asana client
+    if asana_client is None:
+        try:
+            asana_client = AsanaClient()
+            print("AsanaClient initialized")
+        except Exception as e:
+            print(f"AsanaClient not initialized: {e}")
+
+    # start daily Asana check-in loop
+    if not daily_asana_checkin.is_running():
+        daily_asana_checkin.start()
+
     print(f"🤖 Bot ready — logged in as {bot.user} (id={bot.user.id})")
 
 
@@ -371,8 +368,9 @@ async def on_ready():
 @bot.command(name="start")
 async def start(ctx: commands.Context):
     """
-    Create (or recall) the user's private AI thread in this channel.
-    All chat in that thread goes straight to your Assistant.
+    Create (or recall) the user's private AI thread in this channel,
+    create (or recall) their OpenAI thread, and create their Asana project
+    from your template + register them as a program member.
     """
     await increment_stat("stats:commands_start")
 
@@ -381,50 +379,43 @@ async def start(ctx: commands.Context):
         await ctx.reply("Please use `!start` inside a server text channel, not in DMs.")
         return
 
-    existing_thread_id = await get_user_discord_thread(ctx.author.id)
+    user = ctx.author
+
+    # 1) Find or create their private AI thread
+    existing_thread_id = await get_user_discord_thread(user.id)
+    thread = None
     if existing_thread_id:
         thread = ctx.channel.guild.get_thread(existing_thread_id)
         if thread:
             await ctx.reply(f"You already have a thread: {thread.mention}")
-            return
+        else:
+            # thread id stored but thread missing → create new one
+            thread_name = f"{user.display_name}-ai"
+            thread = await ctx.channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.private_thread,
+                reason="Personal AI coaching thread",
+            )
+            await thread.add_user(user)
+            await set_user_discord_thread(user.id, thread.id)
+    else:
+        thread_name = f"{user.display_name}-ai"
+        thread = await ctx.channel.create_thread(
+            name=thread_name,
+            type=discord.ChannelType.private_thread,
+            reason="Personal AI coaching thread",
+        )
+        await thread.add_user(user)
+        await set_user_discord_thread(user.id, thread.id)
+        await ctx.reply(f"Your AI thread is ready: {thread.mention}")
 
-    # Create new private thread
-    thread_name = f"{ctx.author.display_name}-ai"
-    thread = await ctx.channel.create_thread(
-        name=thread_name,
-        type=discord.ChannelType.private_thread,
-        reason="Personal AI coaching thread",
-    )
-    await thread.add_user(ctx.author)
+    # 2) Ensure they have an OpenAI thread
+    await get_or_create_openai_thread(user.id)
 
-    await set_user_discord_thread(ctx.author.id, thread.id)
-    await get_or_create_openai_thread(ctx.author.id)
-    await increment_stat("stats:threads_created")
+    # 3) Mark them as a program member in Redis
+    await redis_client.hset("program_members", str(user.id), "1")
 
-    await thread.send(
-        f"Hey {ctx.author.mention}! 👋\n"
-        "This is your private AI thread.\n"
-        "Just talk to me here — no command needed.\n\n"
-        "Things I can do:\n"
-        "• Chat coaching on sales, setters, Meta ads, YouTube, organic, and marketing\n"
-        "• Analyze *audio* (drop mobile voice messages or call recordings here)\n"
-        "• `!image <prompt>` – generate ads / creatives (50 images/day)\n"
-        "• `!analyzeimage` (with an image attached) – feedback on your creative\n"
-        "• `!analyzepdf` (with a PDF attached) – review your docs/decks\n"
-        "• `!myinfo` – see what I remember about you\n"
-        "• `!resetmemory` – wipe my memory of you\n"
-    )
-
-    await ctx.reply(f"Your AI thread is ready: {thread.mention}")
-
-@bot.command(name="start")
-async def start_command(ctx: commands.Context):
-    user = ctx.author
-
-    # 1) create their private AI thread (you already do this)
-    # thread = await ensure_user_thread(ctx, user)
-
-    # 2) create their Asana project from your template
+    # 4) Create their Asana project from your template (if configured)
     if asana_client:
         async with aiohttp.ClientSession() as session:
             try:
@@ -433,11 +424,18 @@ async def start_command(ctx: commands.Context):
                     discord_user_id=user.id,
                     client_name=user.display_name,
                 )
-                await ctx.send(
-                    f"✅ Your 6-month Asana roadmap is ready.\n"
-                    f"I’ll use it to keep you accountable every day at 8 AM CST.\n"
-                    f"(Project ID: `{project_gid}`)"
-                )
+                if thread:
+                    await thread.send(
+                        f"✅ Your 6-month Asana roadmap is ready.\n"
+                        f"I’ll use it to keep you accountable every day at 8 AM CST.\n"
+                        f"(Project ID: `{project_gid}`)"
+                    )
+                else:
+                    await ctx.send(
+                        f"✅ Your 6-month Asana roadmap is ready.\n"
+                        f"I’ll use it to keep you accountable every day at 8 AM CST.\n"
+                        f"(Project ID: `{project_gid}`)"
+                    )
             except Exception as e:
                 await ctx.send(
                     f"⚠️ I couldn't create your Asana project automatically. "
@@ -448,7 +446,21 @@ async def start_command(ctx: commands.Context):
             "⚠️ Asana integration is not configured yet. Ask Derek to set ASANA_ACCESS_TOKEN / ASANA_TEMPLATE_GID."
         )
 
-    # 3) continue with any onboarding questions you already have...
+    # 5) Welcome message in the thread (if it's new)
+    if thread:
+        await thread.send(
+            f"Hey {user.mention}! 👋\n"
+            "This is your private AI thread.\n"
+            "Just talk to me here — no command needed.\n\n"
+            "Things I can do:\n"
+            "• Chat coaching on sales, setters, Meta ads, YouTube, organic, and marketing\n"
+            "• Analyze *audio* (drop mobile voice messages or call recordings here)\n"
+            "• `!image <prompt>` – generate ads / creatives (50 images/day)\n"
+            "• `!analyzeimage` (with an image attached) – feedback on your creative\n"
+            "• `!analyzepdf` (with a PDF attached) – review your docs/decks\n"
+            "• `!myinfo` – see what I remember about you\n"
+            "• `!resetmemory` – wipe my memory of you\n"
+        )
 
 
 @bot.command(name="myinfo")
@@ -567,7 +579,6 @@ async def analyze_pdf_command(ctx: commands.Context):
         await ctx.reply(f"❌ PDF analysis failed: `{e}`")
 
 
-
 # ========= List Commands Command =====
 
 @bot.command(name="commands")
@@ -576,7 +587,7 @@ async def commands_list(ctx: commands.Context):
 🧾 **Available Commands**
 
 **General**
-• `!start` — Creates your private AI thread  
+• `!start` — Creates your private AI thread + Asana roadmap  
 • `!myinfo` — Shows what I remember about you  
 • `!resetmemory` — Wipes your memory  
 
@@ -778,35 +789,49 @@ Respond as a Christian mentor, with scripture support.
         except Exception as e:
             await message.channel.send(f"⚠️ Error answering your voice message: `{e}`")
 
+
+# ========= DAILY ASANA CHECK-IN =========
+
 @tasks.loop(time=time(hour=14, minute=0))  # ~8am CST = 14:00 UTC
 async def daily_asana_checkin():
     """
-    Runs once a day. For every user that has an Asana project + a thread,
-    post their daily agenda.
+    Runs once a day. For every user that is a program member and has
+    an Asana project + a thread, post their daily agenda into their AI thread.
     """
     if asana_client is None:
         return
 
-    # You already have *some* way to know which users have threads / are in the program.
-    # If you store user IDs in Redis or in a file, iterate over them here.
-    # For now, we’ll assume a simple list `PROGRAM_USER_IDS` you maintain.
-    from bot_config import PROGRAM_USER_IDS  # or replace with your own mechanism
+    # all program members (user ids) from Redis
+    user_ids = await redis_client.hkeys("program_members")
+    if not user_ids:
+        return
 
     async with aiohttp.ClientSession() as session:
-        for user_id in PROGRAM_USER_IDS:
+        for user_id_str in user_ids:
+            try:
+                user_id = int(user_id_str)
+            except ValueError:
+                continue
+
             project_gid = asana_client.get_project_for_user(user_id)
             if not project_gid:
                 continue
 
-            # Get their thread/channel
-            user = bot.get_user(user_id)
-            if user is None:
-                continue
+            # look up their AI thread
+            thread_id = await get_user_discord_thread(user_id)
+            channel: discord.abc.Messageable | None = None
 
-            # You should replace this with however you fetch their private AI thread:
-            # e.g. thread = await get_or_create_user_thread(user)
-            # For now, just DM them:
-            channel = user.dm_channel or await user.create_dm()
+            if thread_id:
+                channel = bot.get_channel(thread_id)
+
+            # fallback: DM if we can't find the thread
+            if channel is None:
+                user = bot.get_user(user_id)
+                if user:
+                    channel = user.dm_channel or await user.create_dm()
+
+            if channel is None:
+                continue
 
             agenda_text = await asana_client.build_daily_agenda(
                 session=session,
