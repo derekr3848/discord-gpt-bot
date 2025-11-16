@@ -264,7 +264,99 @@ async def coach_answer(user_id: int, user_message: str) -> str:
     await summarize_and_update_memory(user_id, user_message, reply)
     await incr_stat(user_id, "messages_answered", 1)
     return reply
+# -------------------------------------------------------
+# RELATIVE DUE DATE ENGINE FOR ASANA
+# -------------------------------------------------------
+from datetime import datetime, timedelta
 
+RELATIVE_DATES = {
+    "DO THIS FIRST": 0,
+    "Ensure entry payment has successfully gone through": 0,
+    "Complete and Sign the Panda Docs Agreement Form": 0,
+    "Get Access to Community By Completing Your Onboarding Type Form": 0,
+    "Download Asana App": 0,
+    "Begin Filling Out Your Mandatory EOD Tracker DAILY": 0,
+
+    # Day 1
+    "Schedule In Your Launch Call with your Dedicated Growth Operator": 0,
+    "Get Access to Ave Crux Archives": 0,
+
+    # Day 2 tasks
+    "Schedule in your 1 on 1 calls": 2,
+    "Watch Section 1 (Ave Crux Archives)": 2,
+    "Watch Section 1-B": 2,
+    "Watch Section 2-A": 2,
+    "Watch Section 2-B": 2,
+    "Send Niche, Offer, & Service to Coaches": 2,
+    "Received Approval From Coaches": 2,
+    "Complete Logos, Names, LLC (Low Priority)": 2,
+
+    # CRM / Day 3
+    "Watch 2-C and Follow Along": 2,
+    "Test SMS + Email Automations work properly": 2,
+    "Create a FB Ad Account to Warm up (Check 3-B for help)": 2,
+
+    # Nurture / Day 3
+    "Watch 4-A and Complete": 3,
+    "Send to Coaches to Approve": 3,
+
+    # Outreach Day 4
+    "Watch 3-B and Follow Along": 4,
+
+    # Sales Prep Day 4–5
+    "Create Sales Script from Our Framework": 5,
+    "Ask Coaches What Sales Team will Be Needed": 5,
+    "If Told To: Hire Setter": 5,
+    "If Told To: Hire Closer": 5,
+    "Create Payment Processor Here": 5,
+
+    # Fulfillment Day 5
+    "DM Coaches": 6,
+
+    # Pre-launch Day 5
+    "Watch 2-E and download all trackers": 6,
+    "FILL OUT TRACKERS DAILY (MANDATORY)": 6,
+
+    # Launch Day 6
+    "Turn on Ads": 6,
+}
+
+
+def assign_relative_due_dates(project_id, start_date, client_asana):
+    """
+    Applies due dates to tasks inside a duplicated Asana project based on task names.
+    """
+
+    print("🔧 Applying due dates to tasks...")
+
+    # convert ISO date string to datetime
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+
+    # fetch tasks
+    tasks = client_asana.tasks.get_tasks_for_project(
+        project_id,
+        {"opt_fields": "name,assignee,due_on"}
+    )
+
+    for task in tasks:
+        task_name = task.get("name", "").strip()
+
+        # Look up offset
+        offset = RELATIVE_DATES.get(task_name)
+        if offset is None:
+            continue  # skip tasks not mapped
+
+        # New due date
+        due_date = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+
+        # Apply
+        try:
+            client_asana.tasks.update_task(task["gid"], {"due_on": due_date})
+            print(f"✅ Set due date for '{task_name}' → {due_date}")
+        except Exception as e:
+            print(f"❌ Error setting due date for '{task_name}': {e}")
+
+    print("🎉 All relative due dates applied!")
 # ============================================================
 # ASANA – DUPLICATE TEMPLATE
 # ============================================================
@@ -415,6 +507,11 @@ async def run_onboarding(thread: discord.Thread, user: discord.Member) -> Dict[s
     return meta
 
 assign_relative_due_dates(new_project_id, today_str)
+
+new_project_id = created['gid']
+today_str = dt.date.today().isoformat()
+
+assign_relative_due_dates(new_project_id, today_str, client_asana)
 
 # -------------------------------------------
 # APPLY RELATIVE DUE DATES TO TASKS
