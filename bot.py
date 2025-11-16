@@ -27,7 +27,7 @@ OPENAI_ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 REDIS_URL = os.getenv("REDIS_URL")
 
 ASANA_ACCESS_TOKEN = os.getenv("ASANA_ACCESS_TOKEN")
-ASANA_TEMPLATE_GID = os.getenv("ASANA_TEMPLATE_GID")  # your template project GID
+ASANA_TEMPLATE_GID = os.getenv("ASANA_TEMPLATE_GID")  # your onboarding project GID
 
 OWNER_DISCORD_ID = os.getenv("OWNER_DISCORD_ID")  # Derek's user ID as string
 
@@ -71,6 +71,9 @@ def k_onboarding_stage(user_id: int) -> str:
 
 def k_last_checkin(user_id: int) -> str:
     return f"user:{user_id}:last_checkin_date"
+
+def k_asana_project(user_id: int) -> str:
+    return f"user:{user_id}:asana_project_gid"
 
 def today_str() -> str:
     return dt.date.today().isoformat()
@@ -264,107 +267,118 @@ async def coach_answer(user_id: int, user_message: str) -> str:
     await summarize_and_update_memory(user_id, user_message, reply)
     await incr_stat(user_id, "messages_answered", 1)
     return reply
-# -------------------------------------------------------
-# RELATIVE DUE DATE ENGINE FOR ASANA
-# -------------------------------------------------------
-from datetime import datetime, timedelta
 
-RELATIVE_DATES = {
-    "DO THIS FIRST": 0,
-    "Ensure entry payment has successfully gone through": 0,
-    "Complete and Sign the Panda Docs Agreement Form": 0,
-    "Get Access to Community By Completing Your Onboarding Type Form": 0,
-    "Download Asana App": 0,
-    "Begin Filling Out Your Mandatory EOD Tracker DAILY": 0,
+# ============================================================
+# ASANA — DUPLICATE PROJECT + RELATIVE DUE DATES
+# ============================================================
 
-    # Day 1
-    "Schedule In Your Launch Call with your Dedicated Growth Operator": 0,
-    "Get Access to Ave Crux Archives": 0,
-
-    # Day 2 tasks
-    "Schedule in your 1 on 1 calls": 2,
-    "Watch Section 1 (Ave Crux Archives)": 2,
-    "Watch Section 1-B": 2,
-    "Watch Section 2-A": 2,
-    "Watch Section 2-B": 2,
-    "Send Niche, Offer, & Service to Coaches": 2,
-    "Received Approval From Coaches": 2,
-    "Complete Logos, Names, LLC (Low Priority)": 2,
-
-    # CRM / Day 3
-    "Watch 2-C and Follow Along": 2,
-    "Test SMS + Email Automations work properly": 2,
-    "Create a FB Ad Account to Warm up (Check 3-B for help)": 2,
-
-    # Nurture / Day 3
-    "Watch 4-A and Complete": 3,
-    "Send to Coaches to Approve": 3,
-
-    # Outreach Day 4
-    "Watch 3-B and Follow Along": 4,
-
-    # Sales Prep Day 4–5
-    "Create Sales Script from Our Framework": 5,
-    "Ask Coaches What Sales Team will Be Needed": 5,
-    "If Told To: Hire Setter": 5,
-    "If Told To: Hire Closer": 5,
-    "Create Payment Processor Here": 5,
-
-    # Fulfillment Day 5
-    "DM Coaches": 6,
-
-    # Pre-launch Day 5
-    "Watch 2-E and download all trackers": 6,
-    "FILL OUT TRACKERS DAILY (MANDATORY)": 6,
-
-    # Launch Day 6
-    "Turn on Ads": 6,
-}
-
-
-def assign_relative_due_dates(project_id, start_date, client_asana):
+async def asana_apply_relative_due_dates(project_gid: str):
     """
-    Applies due dates to tasks inside a duplicated Asana project based on task names.
+    Reads sections in the duplicated project, infers day offsets from section names, and
+    sets real calendar due dates for each task.
+
+    Section naming rules (in Asana):
+      - "On project start date" -> offset 0
+      - "2 days after"          -> offset 2
+      - "3 days after"          -> offset 3
+      - "5 days after"          -> offset 5
+      - "6 days after"          -> offset 6
+      - "Day 1", "Day 2", etc.  -> offset = day - 1
     """
 
-    print("🔧 Applying due dates to tasks...")
+    if not ASANA_ACCESS_TOKEN:
+        log.info("Asana token not set; skipping due date application.")
+        return
 
-    # convert ISO date string to datetime
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    headers = {
+        "Authorization": f"Bearer {ASANA_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    base_url = "https://app.asana.com/api/1.0"
+    start_date = dt.date.today()
 
-    # fetch tasks
-    tasks = client_asana.tasks.get_tasks_for_project(
-        project_id,
-        {"opt_fields": "name,assignee,due_on"}
-    )
+    async with aiohttp.ClientSession() as session:
+        # Fetch sections
+        sections_url = f"{base_url}/projects/{project_gid}/sections"
+        async with session.get(sections_url, headers=headers) as resp:
+            sections_data = await resp.json()
+            if resp.status >= 300:
+                log.error("Asana sections error %s: %s", resp.status, sections_data)
+                return
+        sections = sections_data.get("data", [])
 
-    for task in tasks:
-        task_name = task.get("name", "").strip()
+        section_offsets: Dict[str, int] = {}
+        for sec in sections:
+            name = sec.get("name", "").lower()
+            gid = sec["gid"]
+            offset = 0
 
-        # Look up offset
-        offset = RELATIVE_DATES.get(task_name)
-        if offset is None:
-            continue  # skip tasks not mapped
+            if "on project start date" in name:
+                offset = 0
+            elif "days after" in name:
+                # e.g. "2 days after"
+                try:
+                    num = int(name.split("days after")[0].strip())
+                    offset = num
+                except Exception:
+                    offset = 0
+            elif name.startswith("day "):
+                # e.g. "Day 3"
+                try:
+                    num = int(name.replace("day", "").strip())
+                    offset = max(num - 1, 0)
+                except Exception:
+                    offset = 0
 
-        # New due date
-        due_date = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+            section_offsets[gid] = offset
 
-        # Apply
-        try:
-            client_asana.tasks.update_task(task["gid"], {"due_on": due_date})
-            print(f"✅ Set due date for '{task_name}' → {due_date}")
-        except Exception as e:
-            print(f"❌ Error setting due date for '{task_name}': {e}")
+        # Fetch tasks in project
+        tasks_url = f"{base_url}/tasks?project={project_gid}&limit=100&opt_fields=name,memberships.section"
+        async with session.get(tasks_url, headers=headers) as resp:
+            tasks_data = await resp.json()
+            if resp.status >= 300:
+                log.error("Asana tasks error %s: %s", resp.status, tasks_data)
+                return
+        tasks = tasks_data.get("data", [])
 
-    print("🎉 All relative due dates applied!")
-# ============================================================
-# ASANA – DUPLICATE TEMPLATE
-# ============================================================
+        # Apply due dates
+        for task in tasks:
+            task_gid = task["gid"]
+            name = task.get("name", "")
+            memberships = task.get("memberships", [])
+            if not memberships:
+                continue
+            section = memberships[0].get("section")
+            if not section:
+                continue
+            sec_gid = section.get("gid")
+            if not sec_gid or sec_gid not in section_offsets:
+                continue
+
+            offset_days = section_offsets[sec_gid]
+            due_date = start_date + dt.timedelta(days=offset_days)
+            due_str = due_date.isoformat()
+
+            update_url = f"{base_url}/tasks/{task_gid}"
+            payload = {"data": {"due_on": due_str}}
+
+            try:
+                async with session.put(update_url, headers=headers, json=payload) as uresp:
+                    if uresp.status >= 300:
+                        body = await uresp.text()
+                        log.error("Failed to set due date for task %s: %s %s", name, uresp.status, body)
+                    else:
+                        log.info("Set due date for '%s' -> %s", name, due_str)
+            except Exception:
+                log.exception("Error updating Asana task due date")
 
 async def asana_duplicate_project_for_user(user_id: int, email: str, name: str) -> Optional[str]:
     """
-    Duplicate ASANA_TEMPLATE_GID as a new project. We keep this simple to avoid 400 errors.
-    No schedule_dates, no fancy options. You can manually share/add commenters later.
+    Duplicate ASANA_TEMPLATE_GID as a new project:
+    - Uses your template project
+    - Applies relative due dates
+    - Adds client as comment-only guest
+    - Stores project GID in Redis
     """
     if not ASANA_ACCESS_TOKEN or not ASANA_TEMPLATE_GID:
         log.info("Asana env vars not set, skipping Asana duplication.")
@@ -375,11 +389,11 @@ async def asana_duplicate_project_for_user(user_id: int, email: str, name: str) 
         "Content-Type": "application/json",
     }
 
-    url = f"https://app.asana.com/api/1.0/projects/{ASANA_TEMPLATE_GID}/duplicate"
+    base_url = "https://app.asana.com/api/1.0"
+    url = f"{base_url}/projects/{ASANA_TEMPLATE_GID}/duplicate"
     payload = {
         "data": {
             "name": f"{name} – Program Board",
-            # minimal set of fields to reduce risk of 400s
             "include": [
                 "members",
                 "notes",
@@ -389,24 +403,51 @@ async def asana_duplicate_project_for_user(user_id: int, email: str, name: str) 
         }
     }
 
+    new_project_gid: Optional[str] = None
+
     try:
         async with aiohttp.ClientSession() as session:
+            # Duplicate project
             async with session.post(url, headers=headers, json=payload) as resp:
                 data = await resp.json()
                 if resp.status >= 300:
                     log.error("Asana duplicate error %s: %s", resp.status, data)
                     return None
+
+            new_project = data.get("data", {}).get("new_project")
+            if new_project and "gid" in new_project:
+                new_project_gid = new_project["gid"]
+            else:
+                log.error("Asana response missing new_project gid: %s", data)
+                return None
+
+            # Apply relative due dates based on sections
+            await asana_apply_relative_due_dates(new_project_gid)
+
+            # Add client as comment-only guest (best-effort)
+            try:
+                membership_url = f"{base_url}/project_memberships"
+                membership_payload = {
+                    "data": {
+                        "project": new_project_gid,
+                        "user": email,
+                        "role": "comment_only"
+                    }
+                }
+                async with session.post(membership_url, headers=headers, json=membership_payload) as mresp:
+                    if mresp.status >= 300:
+                        mbody = await mresp.text()
+                        log.warning("Asana membership add failed %s: %s", mresp.status, mbody)
+            except Exception:
+                log.exception("Failed to add Asana comment-only membership")
+
     except Exception:
-        log.exception("Asana request failed")
+        log.exception("Asana duplication flow failed")
         return None
 
-    try:
-        new_project = data.get("data", {}).get("new_project")
-        if new_project and "gid" in new_project:
-            proj_gid = new_project["gid"]
-            return f"https://app.asana.com/0/{proj_gid}/board"
-    except Exception:
-        log.exception("Asana response parse error")
+    if new_project_gid:
+        await redis_client.set(k_asana_project(user_id), new_project_gid)
+        return f"https://app.asana.com/0/{new_project_gid}/list"
 
     return None
 
@@ -505,106 +546,6 @@ async def run_onboarding(thread: discord.Thread, user: discord.Member) -> Dict[s
             log.exception("Failed to DM owner about onboarding")
 
     return meta
-
-assign_relative_due_dates(new_project_id, today_str)
-
-new_project_id = created['gid']
-today_str = dt.date.today().isoformat()
-
-assign_relative_due_dates(new_project_id, today_str, client_asana)
-
-# -------------------------------------------
-# APPLY RELATIVE DUE DATES TO TASKS
-# -------------------------------------------
-
-# Define your custom day offsets
-RELATIVE_DATES = {
-    "DO THIS FIRST": 0,
-    "Ensure entry payment has successfully gone through": 0,
-    "Complete and Sign the Panda Docs Agreement Form": 0,
-    "Get Access to Community By Completing Your Onboarding Type Form": 0,
-    "Download Asana App": 0,
-    "Begin Filling Out Your Mandatory EOD Tracker DAILY": 0,
-
-    # Day 1 tasks
-    "Schedule In Your Launch Call with your Dedicated Growth Operator": 0,
-    "Get Access to Ave Crux Archives": 0,
-
-    # Day 2 tasks
-    "Schedule in your 1 on 1 calls": 2,
-    "Watch Section 1 (Ave Crux Archives)": 2,
-    "Watch Section 1-B": 2,
-    "Watch Section 2-A": 2,
-    "Watch Section 2-B": 2,
-    "Send Niche, Offer, & Service to Coaches": 2,
-    "Received Approval From Coaches": 2,
-    "Complete Logos, Names, LLC (Low Priority)": 2,
-
-    # CRM – Day 3
-    "Watch 2-C and Follow Along": 2,
-    "Test SMS + Email Automations work properly": 2,
-    "Create a FB Ad Account to Warm up (Check 3-B for help)": 2,
-
-    # Nurture – Day 3
-    "Watch 4-A and Complete": 3,
-    "Send to Coaches to Approve": 3,
-
-    # Outreach – Day 4
-    "Watch 3-B and Follow Along": 4,
-
-    # Sales Prep – Day 4
-    "Create Sales Script from Our Framework": 5,
-    "Ask Coaches What Sales Team will Be Needed": 5,
-    "If Told To: Hire Setter": 5,
-    "If Told To: Hire Closer": 5,
-    "Create Payment Processor Here": 5,
-
-    # Fulfillment Ready – Day 5
-    "DM Coaches": 6,
-
-    # Pre-launch – Day 5
-    "Watch 2-E and download all trackers": 6,
-    "FILL OUT TRACKERS DAILY (MANDATORY)": 6,
-
-    # Launch – Day 6
-    "Turn on Ads": 6,
-}
-
-
-def assign_relative_due_dates(project_id, start_date):
-    """
-    Goes through all tasks in the new project and assigns due dates based on RELATIVE_DATES mapping.
-    """
-
-    from datetime import datetime, timedelta
-
-    # Convert start_date to datetime
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-
-    # Fetch all tasks in the project
-    tasks = client_asana.tasks.get_tasks_for_project(
-        project_id,
-        {"opt_fields": "name,assignee,due_on"}
-    )
-
-    for task in tasks:
-        name = task.get("name", "").strip()
-
-        # Find offset
-        offset = RELATIVE_DATES.get(name)
-        if offset is None:
-            # This task does not have a mapped due date
-            continue
-
-        # Calculate new due date
-        new_due = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
-
-        # Update task
-        try:
-            client_asana.tasks.update_task(task["gid"], {"due_on": new_due})
-            print(f"[OK] Set due date for {name} → {new_due}")
-        except Exception as e:
-            print(f"[ERROR] Could not update task {name}: {e}")
 
 # ============================================================
 # DISCORD HELPERS
@@ -768,6 +709,7 @@ async def fullreset_command(ctx: commands.Context):
     await redis_client.delete(k_user_thread(uid))
     await redis_client.delete(k_onboarding_stage(uid))
     await redis_client.delete(k_last_checkin(uid))
+    await redis_client.delete(k_asana_project(uid))
 
     await ctx.send(f"🧨 Full reset done for {target.mention}.")
 
