@@ -546,23 +546,70 @@ async def inspectmemory_command(ctx: commands.Context, member: discord.Member):
 
 
 @bot.command(name="fullreset")
-async def fullreset_command(ctx: commands.Context, member: discord.Member):
+async def fullreset_command(ctx: commands.Context):
     """
-    **Dangerous**: delete ALL stored data for a user (including Asana mapping),
-    but DO NOT touch their Asana project itself.
-    Only Derek can run this.
+    Interactive full reset:
+    1. Derek runs !fullreset
+    2. Bot asks who to reset
+    3. Bot asks for CONFIRM
+    4. Bot wipes all stored data for that user
     """
     if not await ensure_owner(ctx):
         return
 
-    uid = member.id
+    await ctx.send(
+        "🧨 **FULL RESET MODE**\n"
+        "Who do you want to fully reset?\n"
+        "Please mention the user (ex: `@JohnDoe`).\n"
+        "Type `cancel` to exit."
+    )
 
-    # Fetch some info first for logging
+    def check_user(msg: discord.Message):
+        return msg.author.id == ctx.author.id and msg.channel.id == ctx.channel.id
+
+    try:
+        msg = await bot.wait_for("message", timeout=60.0, check=check_user)
+    except asyncio.TimeoutError:
+        await ctx.send("⏳ Timed out. Full reset cancelled.")
+        return
+
+    if msg.content.lower() == "cancel":
+        await ctx.send("❌ Full reset cancelled.")
+        return
+
+    if not msg.mentions:
+        await ctx.send("⚠️ You must mention a user. Run `!fullreset` again.")
+        return
+
+    target = msg.mentions[0]
+
+    # Ask for confirmation
+    await ctx.send(
+        f"⚠️ You are about to ERASE **ALL DATA** for **{target.mention}**.\n"
+        "This includes:\n"
+        "- Memory\n"
+        "- Metrics\n"
+        "- Onboarding answers\n"
+        "- Asana email+mapping (but NOT their Asana board)\n\n"
+        "Type **CONFIRM** to continue, or **cancel**."
+    )
+
+    try:
+        confirm = await bot.wait_for("message", timeout=60.0, check=check_user)
+    except asyncio.TimeoutError:
+        await ctx.send("⏳ Timed out. Full reset cancelled.")
+        return
+
+    if confirm.content.upper() != "CONFIRM":
+        await ctx.send("❌ Full reset cancelled.")
+        return
+
+    # Perform full reset
+    uid = target.id
     meta = await get_user_meta(uid)
     asana_raw = await redis_client.get(k_user_asana(uid))
     asana = json.loads(asana_raw) if asana_raw else None
 
-    # Delete everything we store
     await redis_client.delete(k_user_thread(uid))
     await redis_client.delete(k_user_memory(uid))
     await redis_client.delete(k_user_meta(uid))
@@ -570,20 +617,21 @@ async def fullreset_command(ctx: commands.Context, member: discord.Member):
     await redis_client.delete(k_user_asana(uid))
     await redis_client.delete(k_daily_checkin_date(uid))
 
-    await ctx.send(f"🧨 Completely reset stored data for {member.mention}. They’ll need to run `!start` again.")
+    await ctx.send(f"🧨 **{target.mention} has been fully reset.**")
 
-    # DM Derek with audit info
+    # DM Derek the audit
     owner = bot.get_user(int(OWNER_DISCORD_ID))
     if owner:
         try:
             await owner.send(
                 f"⚠️ FULL RESET EXECUTED\n"
-                f"User: {member} ({uid})\n"
+                f"User: {target} ({uid})\n\n"
                 f"Meta before reset:\n```json\n{json.dumps(meta, indent=2)}\n```\n"
-                f"Asana mapping before reset:\n```json\n{json.dumps(asana, indent=2) if asana else 'None'}\n```"
+                f"Asana mapping:\n```json\n{json.dumps(asana, indent=2) if asana else 'None'}\n```"
             )
         except Exception:
-            log.exception("Failed to DM owner about fullreset")
+            log.exception("Failed to DM owner audit log")
+
 
 
 @bot.command(name="analyzecall")
