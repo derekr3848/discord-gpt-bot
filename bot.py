@@ -2,6 +2,7 @@ import os
 import io
 import textwrap
 import asyncio
+import base64
 
 import discord
 from discord.ext import commands
