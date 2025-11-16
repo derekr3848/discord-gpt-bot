@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
+from discord.ext import tasks
+import aiohttp
+from datetime import time, datetime, timezone
+
+from asana_integration import AsanaClient
 
 from openai import OpenAI
 import redis.asyncio as redis
@@ -45,6 +50,23 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+asana_client = None
+
+@bot.event
+async def on_ready():
+    global asana_client
+    if asana_client is None:
+        try:
+            asana_client = AsanaClient()
+            print("AsanaClient initialized")
+        except Exception as e:
+            print(f"AsanaClient not initialized: {e}")
+
+    if not daily_asana_checkin.is_running():
+        daily_asana_checkin.start()
+
+    print(f"Bot logged in as {bot.user}")
 
 
 # ========= REDIS HELPERS =========
@@ -395,6 +417,39 @@ async def start(ctx: commands.Context):
 
     await ctx.reply(f"Your AI thread is ready: {thread.mention}")
 
+@bot.command(name="start")
+async def start_command(ctx: commands.Context):
+    user = ctx.author
+
+    # 1) create their private AI thread (you already do this)
+    # thread = await ensure_user_thread(ctx, user)
+
+    # 2) create their Asana project from your template
+    if asana_client:
+        async with aiohttp.ClientSession() as session:
+            try:
+                project_gid = await asana_client.create_project_for_user(
+                    session=session,
+                    discord_user_id=user.id,
+                    client_name=user.display_name,
+                )
+                await ctx.send(
+                    f"✅ Your 6-month Asana roadmap is ready.\n"
+                    f"I’ll use it to keep you accountable every day at 8 AM CST.\n"
+                    f"(Project ID: `{project_gid}`)"
+                )
+            except Exception as e:
+                await ctx.send(
+                    f"⚠️ I couldn't create your Asana project automatically. "
+                    f"Let Derek know. (Error: `{e}`)"
+                )
+    else:
+        await ctx.send(
+            "⚠️ Asana integration is not configured yet. Ask Derek to set ASANA_ACCESS_TOKEN / ASANA_TEMPLATE_GID."
+        )
+
+    # 3) continue with any onboarding questions you already have...
+
 
 @bot.command(name="myinfo")
 async def myinfo(ctx: commands.Context):
@@ -510,6 +565,8 @@ async def analyze_pdf_command(ctx: commands.Context):
         await increment_stat("stats:pdfs_analyzed")
     except Exception as e:
         await ctx.reply(f"❌ PDF analysis failed: `{e}`")
+
+
 
 # ========= List Commands Command =====
 
@@ -721,6 +778,46 @@ Respond as a Christian mentor, with scripture support.
         except Exception as e:
             await message.channel.send(f"⚠️ Error answering your voice message: `{e}`")
 
+@tasks.loop(time=time(hour=14, minute=0))  # ~8am CST = 14:00 UTC
+async def daily_asana_checkin():
+    """
+    Runs once a day. For every user that has an Asana project + a thread,
+    post their daily agenda.
+    """
+    if asana_client is None:
+        return
+
+    # You already have *some* way to know which users have threads / are in the program.
+    # If you store user IDs in Redis or in a file, iterate over them here.
+    # For now, we’ll assume a simple list `PROGRAM_USER_IDS` you maintain.
+    from bot_config import PROGRAM_USER_IDS  # or replace with your own mechanism
+
+    async with aiohttp.ClientSession() as session:
+        for user_id in PROGRAM_USER_IDS:
+            project_gid = asana_client.get_project_for_user(user_id)
+            if not project_gid:
+                continue
+
+            # Get their thread/channel
+            user = bot.get_user(user_id)
+            if user is None:
+                continue
+
+            # You should replace this with however you fetch their private AI thread:
+            # e.g. thread = await get_or_create_user_thread(user)
+            # For now, just DM them:
+            channel = user.dm_channel or await user.create_dm()
+
+            agenda_text = await asana_client.build_daily_agenda(
+                session=session,
+                discord_user_id=user_id,
+            )
+
+            if agenda_text:
+                try:
+                    await channel.send(agenda_text)
+                except Exception as e:
+                    print(f"Failed to send daily Asana agenda to {user_id}: {e}")
 
 
 # ========= AUTO-REPLY IN USER THREAD =========
