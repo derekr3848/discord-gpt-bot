@@ -291,24 +291,27 @@ async def start_cmd(ctx: commands.Context):
 
 
 @bot.command(name="image")
-async def image_cmd(ctx: commands.Context, *, prompt: str):
-    """Generate a marketing image."""
-    await ctx.reply("🎨 Generating image, one sec...")
+async def image_cmd(ctx, *, prompt: str):
+    await ctx.send("🎨 Generating image, one sec...")
 
     try:
         result = client_openai.images.generate(
             model="gpt-image-1",
             prompt=prompt,
-            size="1024x1024",
-            n=1,
         )
-        image_url = result.data[0].url
-        await ctx.reply(image_url)
+
+        # Save image
+        img_bytes = base64.b64decode(result.data[0].b64_json)
+        filename = "image.png"
+        with open(filename, "wb") as f:
+            f.write(img_bytes)
+
+        # Send ONLY the image – no empty text
+        await ctx.send(file=discord.File(filename))
+
     except Exception as e:
-        await ctx.reply(
-            f"❌ Image generation failed: `{e}`\n"
-            "Check that your OpenAI org is verified and `gpt-image-1` is allowed."
-        )
+        await ctx.send(f"❌ Image generation failed: `{e}`")
+
 
 
 # ========= AUTO-REPLY LOGIC =========
