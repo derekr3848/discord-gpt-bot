@@ -26,7 +26,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 ASANA_ACCESS_TOKEN = os.getenv("ASANA_ACCESS_TOKEN")
 ASANA_TEMPLATE_GID = os.getenv("ASANA_TEMPLATE_GID")  # your template project GID
 
-OWNER_DISCORD_ID = os.getenv("OWNER_DISCORD_ID")  # Derek's user ID as string
+OWNER_DISCORD_ID = os.getenv("228896144267149313")  # Derek's user ID as string
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN env var is required")
