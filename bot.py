@@ -511,6 +511,34 @@ async def analyze_pdf_command(ctx: commands.Context):
     except Exception as e:
         await ctx.reply(f"❌ PDF analysis failed: `{e}`")
 
+# ========= List Commands Command =====
+
+@bot.command(name="commands")
+async def commands_list(ctx: commands.Context):
+    cmds = """
+🧾 **Available Commands**
+
+**General**
+• `!start` — Creates your private AI thread  
+• `!myinfo` — Shows what I remember about you  
+• `!resetmemory` — Wipes your memory  
+
+**AI Tools**
+• `!image <prompt>` — Generate an image (50/day)  
+• `!analyzeimage` — Analyze attached image  
+• `!analyzepdf` — Analyze attached PDF  
+
+**Audio (no command needed)**
+• Drop a voice message or audio file in your AI thread → Transcription + correct analysis  
+    - Detects: sales call, setter call, general question, faith question, marketing brainstorming  
+    - Includes red-flag detection  
+
+**Admin Only**
+• `!inspectmemory @user` — View a user's memory
+
+"""
+    await ctx.reply(cmds)
+
 
 # ========= AUDIO PROCESSING =========
 
