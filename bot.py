@@ -4,8 +4,8 @@ import json
 import base64
 import logging
 import datetime as dt
-import asyncio  # needed for TimeoutError and other async helpers
-from typing import Optional, Dict, Any
+import asyncio
+from typing import Optional, Dict, Any, List
 
 import aiohttp
 import discord
@@ -13,16 +13,18 @@ from discord.ext import commands, tasks
 import redis.asyncio as redis
 from openai import OpenAI
 
-# ----------------- Basic config -----------------
+# ============================================================
+# BASIC CONFIG
+# ============================================================
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("derek-ai-bot")
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-OPENAI_ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = os.getenv("REDIS_URL")
 
 ASANA_ACCESS_TOKEN = os.getenv("ASANA_ACCESS_TOKEN")
 ASANA_TEMPLATE_GID = os.getenv("ASANA_TEMPLATE_GID")  # your template project GID
@@ -35,22 +37,23 @@ if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY env var is required")
 if not OPENAI_ASSISTANT_ID:
     raise RuntimeError("OPENAI_ASSISTANT_ID env var is required")
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL env var is required")
 if not OWNER_DISCORD_ID:
-    raise RuntimeError("OWNER_DISCORD_ID env var is required (your Discord user ID)")
+    raise RuntimeError("OWNER_DISCORD_ID env var is required")
+
+OWNER_DISCORD_ID_INT = int(OWNER_DISCORD_ID)
 
 client_openai = OpenAI(api_key=OPENAI_API_KEY)
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
-INTENTS = discord.Intents.default()
-INTENTS.message_content = True
-INTENTS.members = True
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-bot = commands.Bot(command_prefix="!", intents=INTENTS)
+# ============================================================
+# REDIS KEY HELPERS
+# ============================================================
 
-# Per-day limits
-MAX_IMAGES_PER_DAY = 50
-
-# Redis key helpers
 def k_user_thread(user_id: int) -> str:
     return f"user:{user_id}:thread_id"
 
@@ -60,161 +63,196 @@ def k_user_memory(user_id: int) -> str:
 def k_user_meta(user_id: int) -> str:
     return f"user:{user_id}:meta"
 
-def k_user_metrics(user_id: int) -> str:
-    return f"user:{user_id}:metrics"
+def k_user_stats(user_id: int) -> str:
+    return f"user:{user_id}:stats"
 
-def k_user_asana(user_id: int) -> str:
-    return f"user:{user_id}:asana"
+def k_onboarding_stage(user_id: int) -> str:
+    return f"user:{user_id}:onboarding_stage"
 
-def k_daily_image_count(date_str: str) -> str:
-    return f"images:{date_str}:count"
-
-def k_daily_image_user(date_str: str, user_id: int) -> str:
-    return f"images:{date_str}:user:{user_id}"
-
-def k_daily_checkin_date(user_id: int) -> str:
+def k_last_checkin(user_id: int) -> str:
     return f"user:{user_id}:last_checkin_date"
 
-def today_str_cst() -> str:
-    # Just used for limits, not precision-critical
-    return dt.datetime.utcnow().date().isoformat()
+def today_str() -> str:
+    return dt.date.today().isoformat()
 
-# -------------- OpenAI helpers -----------------
+# ============================================================
+# STATS / MEMORY
+# ============================================================
 
+async def incr_stat(user_id: int, key: str, amount: int = 1):
+    stats_key = k_user_stats(user_id)
+    stats = await redis_client.hgetall(stats_key) or {}
+    current = int(stats.get(key, 0))
+    stats[key] = str(current + amount)
+    await redis_client.hset(stats_key, mapping=stats)
 
-async def call_openai_assistant(messages: list[dict]) -> str:
+async def get_stats(user_id: int) -> Dict[str, Any]:
+    return await redis_client.hgetall(k_user_stats(user_id)) or {}
+
+async def get_user_meta(user_id: int) -> Dict[str, Any]:
+    raw = await redis_client.get(k_user_meta(user_id))
+    return json.loads(raw) if raw else {}
+
+async def set_user_meta(user_id: int, meta: Dict[str, Any]):
+    await redis_client.set(k_user_meta(user_id), json.dumps(meta))
+
+async def get_user_memory(user_id: int) -> str:
+    mem = await redis_client.get(k_user_memory(user_id))
+    return mem or ""
+
+async def update_user_memory(user_id: int, summary: str):
+    await redis_client.set(k_user_memory(user_id), summary)
+
+# ============================================================
+# OPENAI – ASSISTANT (THREADS API)
+# ============================================================
+
+async def call_openai_assistant(messages: List[Dict[str, str]]) -> str:
     """
-    Use your dashboard Assistant (OPENAI_ASSISTANT_ID) via Assistants v2 Threads API.
-
-    We take the list of messages (system/user), flatten them into a single
-    conversation text, create a thread, run the Assistant, and return the reply.
+    Use your dashboard Assistant via Threads API.
+    messages: [{"role": "system"/"user", "content": "..."}]
     """
     try:
-        # Flatten messages into a single content string
-        parts: list[str] = []
+        combined = []
         for m in messages:
             role = m.get("role", "user")
             content = m.get("content", "")
-            parts.append(f"{role.upper()}:\n{content}")
-        combined_content = "\n\n".join(parts)
+            combined.append(f"{role.upper()}:\n{content}")
+        full_text = "\n\n".join(combined)
 
-        # 1) Create a temporary thread
         thread = client_openai.beta.threads.create()
-
-        # 2) Add the message to the thread
         client_openai.beta.threads.messages.create(
             thread_id=thread.id,
             role="user",
-            content=combined_content,
+            content=full_text,
         )
-
-        # 3) Run the Assistant on that thread
         run = client_openai.beta.threads.runs.create_and_poll(
             thread_id=thread.id,
             assistant_id=OPENAI_ASSISTANT_ID,
         )
-
-        # 4) Get the latest Assistant message from the thread
-        messages_list = client_openai.beta.threads.messages.list(
+        msgs = client_openai.beta.threads.messages.list(
             thread_id=thread.id,
             order="desc",
             limit=1,
         )
 
-        for msg in messages_list.data:
-            chunks: list[str] = []
+        for msg in msgs.data:
+            chunks = []
             for c in msg.content:
-                # For text blocks
                 if getattr(c, "type", None) == "text":
                     chunks.append(c.text.value)
             if chunks:
                 return "\n".join(chunks)
 
-        return "I had trouble generating a response, please try again."
+        return "I couldn't generate a response — try again."
     except Exception as e:
-        log.exception("Error calling OpenAI Assistant via Threads API")
-        return f"⚠️ Error talking to the AI: `{e}`"
+        log.exception("Assistant error")
+        return f"⚠️ AI error: `{e}`"
 
+# ============================================================
+# SUMMARY UPDATER
+# ============================================================
 
-async def summarize_and_update_memory(user_id: int, new_message: str, ai_reply: str) -> None:
-    """Keep a short 'memory' summary per user in Redis."""
-    key = k_user_memory(user_id)
-    old = await redis_client.get(key) or ""
+async def summarize_and_update_memory(user_id: int, user_message: str, ai_reply: str):
+    old_summary = await get_user_memory(user_id)
     prompt = (
-        "You are maintaining a short, running summary of a coaching client.\n"
-        "Update the summary with any NEW, long-term relevant info "
-        "(business model, offer, audience, goals, personality, etc).\n"
-        "Keep it under 200 words.\n\n"
-        f"Current summary:\n{old}\n\n"
-        f"Latest user message:\n{new_message}\n\n"
-        f"Your last reply:\n{ai_reply}\n\n"
-        "Return ONLY the updated summary."
+        "You maintain a concise, running summary of a coaching client.\n"
+        "Include: niche, offer, stage, goals, recurring problems, personality signals.\n"
+        "Keep under 200 words.\n\n"
+        f"Old summary:\n{old_summary}\n\n"
+        f"User message:\n{user_message}\n\n"
+        f"Your reply:\n{ai_reply}\n\n"
+        "Return ONLY the new summary."
     )
     summary = await call_openai_assistant(
         [
-            {"role": "system", "content": "Update the client summary based on the conversation."},
+            {"role": "system", "content": "Update the client summary."},
             {"role": "user", "content": prompt},
         ]
     )
-    await redis_client.set(key, summary)
+    await update_user_memory(user_id, summary)
 
+# ============================================================
+# IMAGE GENERATION – 50/DAY PER USER
+# ============================================================
 
-async def transcribe_audio(discord_attachment: discord.Attachment) -> Optional[str]:
-    """Download audio from Discord and send to OpenAI for transcription."""
+async def generate_image(prompt: str, user_id: int) -> Optional[bytes]:
+    today_key = f"images:{user_id}:{today_str()}"
+    current = int((await redis_client.get(today_key)) or 0)
+    if current >= 50:
+        return None
+
+    try:
+        resp = client_openai.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            n=1,
+            size="1024x1024",
+        )
+        b64 = resp.data[0].b64_json
+        img_bytes = base64.b64decode(b64)
+        await redis_client.set(today_key, str(current + 1))
+        await incr_stat(user_id, "images_generated", 1)
+        return img_bytes
+    except Exception:
+        log.exception("Image generation failed")
+        return None
+
+# ============================================================
+# AUDIO TRANSCRIPTION + CALL ANALYSIS
+# ============================================================
+
+async def transcribe_audio(attachment: discord.Attachment) -> Optional[str]:
     try:
         buf = io.BytesIO()
-        await discord_attachment.save(buf)
+        await attachment.save(buf)
         buf.seek(0)
         transcript = client_openai.audio.transcriptions.create(
             model="gpt-4o-mini-transcribe",
-            file=("audio.webm", buf, discord_attachment.content_type or "audio/webm"),
+            file=("audio.webm", buf, attachment.content_type or "audio/webm"),
         )
         return getattr(transcript, "text", None)
-    except Exception as e:
-        log.exception("Error transcribing audio")
+    except Exception:
+        log.exception("Transcription error")
         return None
 
-
 async def analyze_call_transcript(transcript: str) -> str:
-    """Sales/setting call analysis with red-flag buckets."""
     prompt = (
-        "You're a ruthless sales coach for Christian agency owners and coaches.\n"
-        "You are given a full transcript of a sales or setter call.\n\n"
+        "You are a ruthless but fair sales coach for Christian agency owners and coaches.\n"
+        "You are given a full transcription of a sales or setter call.\n\n"
+        "Do the following:\n"
         "1) Give a tight summary (3-7 bullet points).\n"
-        "2) Score the caller on a 0-10 scale for:\n"
+        "2) Score the caller 0-10 on:\n"
         "   - Discovery\n   - Qualification\n   - Objection handling\n"
         "   - Call control\n   - Closing\n"
-        "3) List specific ACTION items they should do differently next time.\n"
-        "4) Tag red-flags using ONLY these labels, if present:\n"
+        "3) List specific ACTION items.\n"
+        "4) Tag red flags using ONLY these if present:\n"
         "   💸 Budget flags\n"
         "   🟧 Timeline objections\n"
         "   😕 Uncertainty indicators\n"
         "   🚫 Bad fit warnings\n"
         "   🧊 Lead coldness signals\n"
         "   💀 “Never buying” traits\n"
-        "5) At the end, give an overall verdict like 'Book them', 'Nurture', or 'Disqualify'.\n\n"
-        "Return everything in clean Discord-friendly markdown.\n\n"
+        "5) Give an overall verdict: 'Book them', 'Nurture', or 'Disqualify'.\n\n"
         f"Transcript:\n{transcript}"
     )
-    result = await call_openai_assistant(
+    return await call_openai_assistant(
         [{"role": "user", "content": prompt}]
     )
-    return result
 
+# ============================================================
+# COACH ANSWER (AFTER ONBOARDING)
+# ============================================================
 
 async def coach_answer(user_id: int, user_message: str) -> str:
-    """Normal Q&A coaching answer using your Assistant + stored memory."""
-    memory = await redis_client.get(k_user_memory(user_id)) or ""
-    meta_raw = await redis_client.get(k_user_meta(user_id))
-    meta = json.loads(meta_raw) if meta_raw else {}
+    meta = await get_user_meta(user_id)
+    memory = await get_user_memory(user_id)
 
     system = (
         "You are Derek's AI coach for Christian agency owners and coaches.\n"
-        "You:\n"
-        "- Help with sales, setting, Meta ads, YouTube, organic, and business strategy.\n"
-        "- Are strict but encouraging.\n"
-        "- Keep answers practical and tailored to THIS user.\n\n"
-        f"Client summary (from previous conversations and onboarding):\n{memory}\n\n"
+        "You help with: sales, setting, Meta ads, YouTube, organic, systems, and scaling.\n"
+        "You are strict but encouraging and very practical.\n\n"
+        f"Client summary:\n{memory}\n\n"
         f"Onboarding data:\n{json.dumps(meta, indent=2)}"
     )
 
@@ -224,122 +262,175 @@ async def coach_answer(user_id: int, user_message: str) -> str:
     ]
     reply = await call_openai_assistant(messages)
     await summarize_and_update_memory(user_id, user_message, reply)
+    await incr_stat(user_id, "messages_answered", 1)
     return reply
 
+# ============================================================
+# ASANA – DUPLICATE TEMPLATE
+# ============================================================
 
-# -------------- Asana integration (safe) ---------------
-
-ASYNC_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
-
-
-async def asana_duplicate_project_for_user(user_id: int, email: str, user_name: str) -> Optional[str]:
+async def asana_duplicate_project_for_user(user_id: int, email: str, name: str) -> Optional[str]:
     """
-    Try to duplicate your template project in Asana for this user.
-    If anything fails, we log & return None (bot won't crash).
-    We deliberately avoid 'schedule_dates' (that's what caused the 400 schedule_dates error).
+    Duplicate ASANA_TEMPLATE_GID as a new project. We keep this simple to avoid 400 errors.
+    No schedule_dates, no fancy options. You can manually share/add commenters later.
     """
     if not ASANA_ACCESS_TOKEN or not ASANA_TEMPLATE_GID:
         log.info("Asana env vars not set, skipping Asana duplication.")
         return None
 
-    url = f"https://app.asana.com/api/1.0/projects/{ASANA_TEMPLATE_GID}/duplicate"
     headers = {
         "Authorization": f"Bearer {ASANA_ACCESS_TOKEN}",
         "Content-Type": "application/json",
     }
 
-    project_name = f"{user_name} – Coach AI Program"
-
+    url = f"https://app.asana.com/api/1.0/projects/{ASANA_TEMPLATE_GID}/duplicate"
     payload = {
         "data": {
-            "name": project_name,
+            "name": f"{name} – Program Board",
+            # minimal set of fields to reduce risk of 400s
             "include": [
                 "members",
                 "notes",
-                "task_assignee",
-                "task_dates",
                 "task_subtasks",
                 "task_notes",
             ],
-            # IMPORTANT: no 'schedule_dates' field here to avoid the 400 error.
         }
     }
 
     try:
-        async with aiohttp.ClientSession(timeout=ASYNC_HTTP_TIMEOUT) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload) as resp:
-                text = await resp.text()
+                data = await resp.json()
                 if resp.status >= 300:
-                    log.error("Asana duplicate error %s: %s", resp.status, text)
+                    log.error("Asana duplicate error %s: %s", resp.status, data)
                     return None
-                data = json.loads(text)
-    except Exception as e:
-        log.exception("Error talking to Asana")
+    except Exception:
+        log.exception("Asana request failed")
         return None
 
     try:
         new_project = data.get("data", {}).get("new_project")
         if new_project and "gid" in new_project:
-            project_gid = new_project["gid"]
-            asana_url = f"https://app.asana.com/0/{project_gid}/board"
-            await redis_client.set(
-                k_user_asana(user_id),
-                json.dumps(
-                    {
-                        "email": email,
-                        "project_gid": project_gid,
-                        "project_url": asana_url,
-                    }
-                ),
-            )
-            return asana_url
+            proj_gid = new_project["gid"]
+            return f"https://app.asana.com/0/{proj_gid}/board"
     except Exception:
-        log.exception("Failed to parse Asana duplicate response")
+        log.exception("Asana response parse error")
 
     return None
 
+# ============================================================
+# STRICT ONBOARDING
+# ============================================================
 
-# -------------- Memory / metrics utilities --------------
+ONBOARDING_QUESTIONS = [
+    ("niche", "1️⃣ Who do you serve? (niche / target market)"),
+    ("offer", "2️⃣ What is your core offer? (deliverables + price range)"),
+    ("revenue", "3️⃣ Where are you right now monthly? (revenue + profit)"),
+    ("goal", "4️⃣ Where do you want to be 5–6 months from now?"),
+    ("bottleneck", "5️⃣ What do YOU believe is the biggest bottleneck right now?"),
+    ("email", "6️⃣ What email should I use to create your Asana program board?"),
+]
 
+async def run_onboarding(thread: discord.Thread, user: discord.Member) -> Dict[str, Any]:
+    """
+    STRICT MODE:
+    - Bot ONLY asks onboarding questions.
+    - No coaching or extra commentary.
+    - After last answer: Asana board + unlock coaching.
+    """
+    meta: Dict[str, Any] = {
+        "discord_id": user.id,
+        "discord_name": str(user),
+        "created_at_utc": dt.datetime.utcnow().isoformat(),
+        "onboarding_complete": False,
+    }
 
-async def get_user_meta(user_id: int) -> Dict[str, Any]:
-    raw = await redis_client.get(k_user_meta(user_id))
-    return json.loads(raw) if raw else {}
+    await thread.send(
+        f"Hey {user.mention} 👋\n"
+        "Welcome to your private Derek AI thread.\n\n"
+        "**STRICT ONBOARDING MODE** is active.\n"
+        "I will ONLY ask onboarding questions.\n"
+        "I will NOT coach or reply to anything else until we're finished.\n\n"
+        "Let's start."
+    )
 
+    await redis_client.set(k_onboarding_stage(user.id), "1")
 
-async def set_user_meta(user_id: int, meta: Dict[str, Any]) -> None:
-    await redis_client.set(k_user_meta(user_id), json.dumps(meta))
+    def check(msg: discord.Message) -> bool:
+        return msg.author.id == user.id and msg.channel.id == thread.id
 
+    stage = 1
+    for key, question in ONBOARDING_QUESTIONS:
+        await redis_client.set(k_onboarding_stage(user.id), str(stage))
+        await thread.send(question)
 
-async def inc_metric(user_id: int, field: str, amount: float = 1.0) -> None:
-    key = k_user_metrics(user_id)
-    metrics_raw = await redis_client.get(key)
-    metrics = json.loads(metrics_raw) if metrics_raw else {}
-    metrics[field] = metrics.get(field, 0) + amount
-    await redis_client.set(key, json.dumps(metrics))
+        try:
+            msg = await bot.wait_for("message", timeout=900.0, check=check)
+        except asyncio.TimeoutError:
+            await thread.send(
+                "⏳ You took too long.\n"
+                "Type `!start` later to restart onboarding."
+            )
+            await redis_client.delete(k_onboarding_stage(user.id))
+            return meta
 
+        meta[key] = msg.content.strip()
+        stage += 1
 
-async def get_metrics(user_id: int) -> Dict[str, Any]:
-    raw = await redis_client.get(k_user_metrics(user_id))
-    return json.loads(raw) if raw else {}
+    await redis_client.delete(k_onboarding_stage(user.id))
+    meta["onboarding_complete"] = True
+    await set_user_meta(user.id, meta)
 
+    email = meta.get("email")
+    if email:
+        asana_url = await asana_duplicate_project_for_user(user.id, email, user.display_name)
+        if asana_url:
+            await thread.send(
+                f"✅ Your Asana program board is ready:\n{asana_url}\n\n"
+                "You'll use this for execution & accountability."
+            )
+        else:
+            await thread.send(
+                "⚠️ I couldn't automatically create your Asana board.\n"
+                "Derek will set it up manually."
+            )
 
-# -------------- Discord helpers -----------------
+    await thread.send(
+        "🎉 **Onboarding complete!**\n"
+        "From now on, anything you say in this thread (text or voice) goes straight to the AI.\n"
+        "No more commands needed."
+    )
 
+    owner = bot.get_user(OWNER_DISCORD_ID_INT)
+    if owner:
+        try:
+            await owner.send(
+                f"🆕 New client onboarded: {user} ({user.id})\n"
+                f"Email: {meta.get('email','N/A')}\n"
+                f"Goal: {meta.get('goal','N/A')}"
+            )
+        except Exception:
+            log.exception("Failed to DM owner about onboarding")
+
+    return meta
+
+# ============================================================
+# DISCORD HELPERS
+# ============================================================
+
+async def ensure_owner(ctx: commands.Context) -> bool:
+    if ctx.author.id != OWNER_DISCORD_ID_INT:
+        await ctx.send("⚠️ Only Derek can run this command.")
+        return False
+    return True
 
 async def get_or_create_private_thread(ctx: commands.Context) -> discord.Thread:
-    """
-    Each user gets exactly one private 'AI – <name>' thread inside the channel
-    where they used !start. We'll remember thread_id in Redis so we don't recreate.
-    """
-    key = k_user_thread(ctx.author.id)
-    thread_id = await redis_client.get(key)
-    if thread_id:
-        thread = ctx.guild.get_thread(int(thread_id))
-        if thread:
-            return thread
+    existing_id = await redis_client.get(k_user_thread(ctx.author.id))
+    if existing_id:
+        t = ctx.guild.get_thread(int(existing_id))
+        if t:
+            return t
 
-    # Create new thread
     base_channel = ctx.channel
     thread_name = f"AI – {ctx.author.display_name}"
     thread = await base_channel.create_thread(
@@ -349,398 +440,236 @@ async def get_or_create_private_thread(ctx: commands.Context) -> discord.Thread:
         else discord.ChannelType.public_thread,
     )
     await thread.add_user(ctx.author)
-    await redis_client.set(key, str(thread.id))
+    await redis_client.set(k_user_thread(ctx.author.id), str(thread.id))
     return thread
 
-
-async def ensure_owner(ctx: commands.Context) -> bool:
-    """Check if the command runner is Derek."""
-    if str(ctx.author.id) != str(OWNER_DISCORD_ID):
-        await ctx.send("⚠️ Only Derek can run this command.")
-        return False
-    return True
-
-
-# -------------- Onboarding flow -----------------
-
-
-ONBOARDING_QUESTIONS = [
-    ("niche", "Who are you serving? (niche / target market)"),
-    ("offer", "What is your core offer? (what you sell & price range)"),
-    ("revenue", "Where are you at right now monthly (rev & profit)?"),
-    ("goal", "Where do you want to be 5–6 months from now?"),
-    ("bottleneck", "What do YOU think is the biggest bottleneck right now?"),
-    ("email", "What email should we use for your program & Asana?"),
-]
-
-
-async def run_onboarding(thread: discord.Thread, user: discord.Member) -> Dict[str, Any]:
-    """
-    Ask onboarding questions INSIDE the private AI thread.
-    Returns meta dict saved for the user.
-    """
-    meta: Dict[str, Any] = {
-        "discord_id": user.id,
-        "discord_name": str(user),
-        "created_at_utc": dt.datetime.utcnow().isoformat(),
-    }
-
-    await thread.send(
-        f"Hey {user.mention} 👋\n"
-        "Welcome to your private Derek AI thread.\n\n"
-        "Before we dive in, I need a few quick questions so I can customize everything for you."
-    )
-
-    def check(m: discord.Message) -> bool:
-        return m.author.id == user.id and m.channel.id == thread.id
-
-    for key, question in ONBOARDING_QUESTIONS:
-        await thread.send(question)
-        try:
-            msg = await bot.wait_for("message", timeout=600.0, check=check)
-        except asyncio.TimeoutError:
-            await thread.send("Timed out waiting for your answer. You can type `!start` again later.")
-            return meta
-
-        meta[key] = msg.content.strip()
-
-    await set_user_meta(user.id, meta)
-
-    # Attempt Asana project creation (safe)
-    email = meta.get("email")
-    if email:
-        asana_url = await asana_duplicate_project_for_user(user.id, email, user.display_name)
-        if asana_url:
-            await thread.send(
-                f"✅ I created an Asana board for you here (comment-level):\n{asana_url}\n\n"
-                "Use this as your execution hub. I’ll keep you accountable to it."
-            )
-        else:
-            await thread.send(
-                "⚠️ I couldn’t auto-create your Asana board.\n"
-                "Derek will set it up manually using your email and drop the link here. "
-                "You can still start using this thread in the meantime."
-            )
-
-    await thread.send(
-        "All set. From now on, anything you say **in this thread** (text or voice note) will go straight to the AI.\n"
-        "You no longer need a command to talk to me here."
-    )
-
-    # Let Derek know a new client started
-    owner = bot.get_user(int(OWNER_DISCORD_ID))
-    if owner:
-        try:
-            await owner.send(
-                f"🆕 New client onboarded: {user} ({user.id})\n"
-                f"Email: {meta.get('email','N/A')}\n"
-                f"Niche: {meta.get('niche','N/A')}\n"
-                f"Goal: {meta.get('goal','N/A')}"
-            )
-        except Exception:
-            log.exception("Failed to DM owner about new onboarding")
-
-    return meta
-
-
-# -------------- Commands -----------------
-
+# ============================================================
+# COMMANDS
+# ============================================================
 
 @bot.event
 async def on_ready():
-    log.info("Bot is ready — Logged in as %s", bot.user)
+    log.info("Bot ready as %s", bot.user)
     daily_checkins.start()
-
 
 @bot.command(name="start")
 async def start_command(ctx: commands.Context):
     """Create/find the private AI thread and run onboarding if needed."""
     thread = await get_or_create_private_thread(ctx)
-
-    # Check if we already have onboarding meta
     meta = await get_user_meta(ctx.author.id)
-    if not meta.get("email"):
-        await thread.send("Starting onboarding questions…")
+
+    if not meta.get("onboarding_complete"):
+        await thread.send("Starting onboarding now…")
         await run_onboarding(thread, ctx.author)
     else:
         await thread.send(
-            f"Welcome back, {ctx.author.mention}! You’re already onboarded.\n"
-            "You can just talk to me here—no command needed."
+            f"Welcome back, {ctx.author.mention}!\n"
+            "You’re already onboarded. Just talk to me here."
         )
 
-    await ctx.reply(f"Your private AI thread is ready: {thread.mention}", mention_author=True)
-
+    await ctx.reply(f"Your private AI thread: {thread.mention}", mention_author=True)
 
 @bot.command(name="image")
 async def image_command(ctx: commands.Context, *, prompt: str):
-    """Generate an image (counts toward 50/day global cap)."""
-    today = today_str_cst()
-    global_key = k_daily_image_count(today)
-    user_key = k_daily_image_user(today, ctx.author.id)
-
-    current_global = int(await redis_client.get(global_key) or 0)
-    if current_global >= MAX_IMAGES_PER_DAY:
-        await ctx.send("⚠️ Daily image limit reached. Try again tomorrow.")
+    img_bytes = await generate_image(prompt, ctx.author.id)
+    if img_bytes is None:
+        await ctx.send("⚠️ You hit your 50 images for today. Try again tomorrow.")
         return
-
-    await ctx.send("🎨 Generating image, one sec…")
-
-    try:
-        img_resp = client_openai.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024",
-            n=1,
-            quality="high",
-        )
-        b64 = img_resp.data[0].b64_json
-        binary = base64.b64decode(b64)
-        file = discord.File(io.BytesIO(binary), filename="image.png")
-        await ctx.send(file=file)
-        await inc_metric(ctx.author.id, "images_generated", 1)
-        await redis_client.incr(global_key)
-        await redis_client.incr(user_key)
-    except Exception as e:
-        log.exception("Image generation failed")
-        await ctx.send(f"❌ Image generation failed: `{e}`")
-
+    file = discord.File(io.BytesIO(img_bytes), filename="image.png")
+    await ctx.send(file=file)
 
 @bot.command(name="myinfo")
 async def myinfo_command(ctx: commands.Context):
-    """Show what the bot remembers & your usage stats."""
-    memory = await redis_client.get(k_user_memory(ctx.author.id)) or "(no long-term summary yet)"
     meta = await get_user_meta(ctx.author.id)
-    metrics = await get_metrics(ctx.author.id)
-    asana_raw = await redis_client.get(k_user_asana(ctx.author.id))
-    asana = json.loads(asana_raw) if asana_raw else None
+    mem = await get_user_memory(ctx.author.id) or "(no summary yet)"
+    stats = await get_stats(ctx.author.id)
 
     embed = discord.Embed(
         title="🧠 What I know about you",
-        color=discord.Color.blurple(),
+        color=discord.Color.blurple()
     )
-    embed.add_field(name="Summary", value=memory[:1024], inline=False)
+    embed.add_field(name="Summary", value=mem[:1024], inline=False)
     embed.add_field(
         name="Onboarding data",
         value="```json\n" + json.dumps(meta, indent=2)[:1000] + "\n```",
         inline=False,
     )
     embed.add_field(
-        name="Usage metrics",
-        value="```json\n" + json.dumps(metrics, indent=2)[:1000] + "\n```",
+        name="Stats",
+        value="```json\n" + json.dumps(stats, indent=2)[:1000] + "\n```",
         inline=False,
     )
-    if asana and asana.get("project_url"):
-        embed.add_field(
-            name="Asana board",
-            value=asana["project_url"],
-            inline=False,
-        )
-
     await ctx.send(embed=embed)
-
 
 @bot.command(name="resetmemory")
 async def resetmemory_command(ctx: commands.Context):
-    """Soft reset: clear your AI memory & metrics but keep Asana link."""
     await redis_client.delete(k_user_memory(ctx.author.id))
-    await redis_client.delete(k_user_metrics(ctx.author.id))
-    await ctx.send("🧼 Cleared your AI memory & metrics. We kept your onboarding + Asana.")
-
+    await redis_client.delete(k_user_stats(ctx.author.id))
+    await ctx.send("🧼 Cleared your AI memory & stats. Onboarding data stays.")
 
 @bot.command(name="inspectmemory")
 async def inspectmemory_command(ctx: commands.Context, member: discord.Member):
-    """Admin: inspect another user's memory/meta/metrics."""
     if not await ensure_owner(ctx):
         return
 
-    memory = await redis_client.get(k_user_memory(member.id)) or "(no summary)"
     meta = await get_user_meta(member.id)
-    metrics = await get_metrics(member.id)
-    asana_raw = await redis_client.get(k_user_asana(member.id))
-    asana = json.loads(asana_raw) if asana_raw else None
+    mem = await get_user_memory(member.id)
+    stats = await get_stats(member.id)
 
     content = (
         f"Inspecting {member} ({member.id})\n\n"
-        f"Summary:\n{memory}\n\n"
+        f"Summary:\n{mem}\n\n"
         f"Meta:\n```json\n{json.dumps(meta, indent=2)}\n```\n"
-        f"Metrics:\n```json\n{json.dumps(metrics, indent=2)}\n```"
+        f"Stats:\n```json\n{json.dumps(stats, indent=2)}\n```"
     )
-    if asana:
-        content += f"\nAsana:\n```json\n{json.dumps(asana, indent=2)}\n```"
-
     await ctx.send(content[:2000])
-
 
 @bot.command(name="fullreset")
 async def fullreset_command(ctx: commands.Context):
-    """
-    Interactive full reset:
-    1. Derek runs !fullreset
-    2. Bot asks who to reset
-    3. Bot asks for CONFIRM
-    4. Bot wipes all stored data for that user
-    """
     if not await ensure_owner(ctx):
         return
 
-    await ctx.send(
-        "🧨 **FULL RESET MODE**\n"
-        "Who do you want to fully reset?\n"
-        "Please mention the user (ex: `@JohnDoe`).\n"
-        "Type `cancel` to exit."
-    )
+    await ctx.send("🧨 Who do you want to full-reset? Mention them, or type `cancel`.")
 
-    def check_user(msg: discord.Message):
+    def check(msg: discord.Message) -> bool:
         return msg.author.id == ctx.author.id and msg.channel.id == ctx.channel.id
 
     try:
-        msg = await bot.wait_for("message", timeout=60.0, check=check_user)
+        msg = await bot.wait_for("message", timeout=60.0, check=check)
     except asyncio.TimeoutError:
-        await ctx.send("⏳ Timed out. Full reset cancelled.")
+        await ctx.send("Timed out.")
         return
 
     if msg.content.lower() == "cancel":
-        await ctx.send("❌ Full reset cancelled.")
+        await ctx.send("Cancelled.")
         return
 
     if not msg.mentions:
-        await ctx.send("⚠️ You must mention a user. Run `!fullreset` again.")
+        await ctx.send("You must @mention a user.")
         return
 
     target = msg.mentions[0]
 
     await ctx.send(
-        f"⚠️ You are about to ERASE **ALL DATA** for **{target.mention}**.\n"
-        "This includes:\n"
-        "- Memory\n"
-        "- Metrics\n"
-        "- Onboarding answers\n"
-        "- Asana email+mapping (but NOT their Asana board)\n\n"
-        "Type **CONFIRM** to continue, or **cancel**."
+        f"⚠️ This will erase ALL stored data for {target.mention}.\n"
+        "Type `CONFIRM` to continue, or anything else to cancel."
     )
 
     try:
-        confirm = await bot.wait_for("message", timeout=60.0, check=check_user)
+        confirm = await bot.wait_for("message", timeout=60.0, check=check)
     except asyncio.TimeoutError:
-        await ctx.send("⏳ Timed out. Full reset cancelled.")
+        await ctx.send("Timed out.")
         return
 
-    if confirm.content.upper() != "CONFIRM":
-        await ctx.send("❌ Full reset cancelled.")
+    if confirm.content.strip().upper() != "CONFIRM":
+        await ctx.send("Cancelled.")
         return
 
     uid = target.id
     meta = await get_user_meta(uid)
-    asana_raw = await redis_client.get(k_user_asana(uid))
-    asana = json.loads(asana_raw) if asana_raw else None
+    mem = await get_user_memory(uid)
+    stats = await get_stats(uid)
 
-    await redis_client.delete(k_user_thread(uid))
-    await redis_client.delete(k_user_memory(uid))
     await redis_client.delete(k_user_meta(uid))
-    await redis_client.delete(k_user_metrics(uid))
-    await redis_client.delete(k_user_asana(uid))
-    await redis_client.delete(k_daily_checkin_date(uid))
+    await redis_client.delete(k_user_memory(uid))
+    await redis_client.delete(k_user_stats(uid))
+    await redis_client.delete(k_user_thread(uid))
+    await redis_client.delete(k_onboarding_stage(uid))
+    await redis_client.delete(k_last_checkin(uid))
 
-    await ctx.send(f"🧨 **{target.mention} has been fully reset.**")
+    await ctx.send(f"🧨 Full reset done for {target.mention}.")
 
-    owner = bot.get_user(int(OWNER_DISCORD_ID))
+    owner = bot.get_user(OWNER_DISCORD_ID_INT)
     if owner:
         try:
             await owner.send(
-                f"⚠️ FULL RESET EXECUTED\n"
-                f"User: {target} ({uid})\n\n"
-                f"Meta before reset:\n```json\n{json.dumps(meta, indent=2)}\n```\n"
-                f"Asana mapping:\n```json\n{json.dumps(asana, indent=2) if asana else 'None'}\n```"
+                f"FULL RESET for {target} ({uid})\n"
+                f"Meta:\n```json\n{json.dumps(meta, indent=2)}\n```\n"
+                f"Memory:\n{mem}\n\n"
+                f"Stats:\n```json\n{json.dumps(stats, indent=2)}\n```"
             )
         except Exception:
-            log.exception("Failed to DM owner audit log")
-
+            log.exception("Failed to DM owner about reset")
 
 @bot.command(name="analyzecall")
 async def analyzecall_command(ctx: commands.Context):
-    """
-    Analyze a sales/setting call recording attached to this command.
-    """
     if not ctx.message.attachments:
-        await ctx.send("Attach an audio file (or voice message) **to the same message** as `!analyzecall`.")
+        await ctx.send("Attach an audio file to the same message as `!analyzecall`.")
         return
 
-    audio = ctx.message.attachments[0]
-    await ctx.send("🎧 Received audio. Transcribing your call…")
+    attachment = ctx.message.attachments[0]
+    await ctx.send("🎧 Transcribing your call…")
 
-    transcript = await transcribe_audio(audio)
-    if not transcript:
-        await ctx.send("❌ I couldn't transcribe that audio. Try again with a clearer file.")
+    text = await transcribe_audio(attachment)
+    if not text:
+        await ctx.send("❌ Could not transcribe that audio.")
         return
 
-    await ctx.send("✏️ Transcription complete. Analyzing now…")
+    await ctx.send("✏️ Analyzing…")
 
-    analysis = await analyze_call_transcript(transcript)
-
+    analysis = await analyze_call_transcript(text)
     if len(analysis) <= 2000:
         await ctx.send(analysis)
     else:
         buf = io.StringIO(analysis)
         file = discord.File(buf, filename="call-analysis.txt")
-        await ctx.send("The analysis was long, so I put it in a file:", file=file)
+        await ctx.send("The analysis is long, so I put it in a file:", file=file)
 
-    await inc_metric(ctx.author.id, "audio_minutes_analyzed", 5)  # rough guess
+    await incr_stat(ctx.author.id, "audio_minutes_analyzed", 5)
 
-
-# -------------- Daily check-ins -----------------
-
+# ============================================================
+# DAILY CHECK-INS (~8AM CST)
+# ============================================================
 
 @tasks.loop(minutes=10)
 async def daily_checkins():
-    """
-    Every 10 minutes, check if it's ~8am CST and send a check-in to each onboarded user,
-    once per day.
-    """
     now_utc = dt.datetime.utcnow()
     hour_cst = (now_utc.hour - 6) % 24
-
     if hour_cst != 8:
         return
 
     today = now_utc.date().isoformat()
 
-    known_key = "known_users"
-    user_ids = await redis_client.smembers(known_key)
-    if not user_ids:
-        return
+    keys = await redis_client.keys("user:*:meta")
+    for key in keys:
+        try:
+            uid = int(key.split(":")[1])
+        except Exception:
+            continue
 
-    for uid_str in user_ids:
-        uid = int(uid_str)
-        last = await redis_client.get(k_daily_checkin_date(uid))
+        last = await redis_client.get(k_last_checkin(uid))
         if last == today:
             continue
 
         thread_id = await redis_client.get(k_user_thread(uid))
         if not thread_id:
             continue
-        thread = bot.get_channel(int(thread_id))
-        if not isinstance(thread, discord.Thread):
+
+        channel = bot.get_channel(int(thread_id))
+        if not isinstance(channel, discord.Thread):
             continue
 
         meta = await get_user_meta(uid)
-        goal = meta.get("goal", "Hit your next revenue level")
+        goal = meta.get("goal", "Hit your next target")
+
         msg = (
-            f"📆 Daily check-in time.\n"
-            f"Main goal (5–6 months): **{goal}**\n\n"
-            "Reply here with:\n"
+            "📆 **Daily Check-In**\n"
+            f"Main 5–6 month goal: **{goal}**\n\n"
+            "Reply with:\n"
             "1) What you did yesterday\n"
-            "2) The 1–3 most important actions you’ll do today\n"
+            "2) Top 1–3 actions for today\n"
             "3) Anything blocking you"
         )
+
         try:
-            await thread.send(msg)
-            await redis_client.set(k_daily_checkin_date(uid), today)
+            await channel.send(msg)
+            await redis_client.set(k_last_checkin(uid), today)
         except Exception:
-            log.exception("Failed to send daily check-in to %s", uid)
+            log.exception("Check-in send failed")
 
-
-# -------------- on_message: auto-AI in private threads --------------
-
+# ============================================================
+# AUTO-AI REPLIES IN PRIVATE THREAD (STRICT ONBOARDING AWARE)
+# ============================================================
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -749,46 +678,56 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    thread_key = k_user_thread(message.author.id)
-    thread_id = await redis_client.get(thread_key)
+    # If onboarding is in progress, ignore free messages (only run_onboarding consumes them)
+    stage = await redis_client.get(k_onboarding_stage(message.author.id))
+    if stage:
+        return
+
+    # Only auto-respond in user's private thread
+    thread_id = await redis_client.get(k_user_thread(message.author.id))
     if not thread_id:
         return
     if str(message.channel.id) != str(thread_id):
         return
 
+    # Ignore commands here
     if message.content.startswith("!"):
         return
 
-    await redis_client.sadd("known_users", str(message.author.id))
+    meta = await get_user_meta(message.author.id)
+    if not meta.get("onboarding_complete"):
+        # safety guard (shouldn't normally happen)
+        return
 
+    # Voice note?
     if message.attachments:
-        audio = message.attachments[0]
-        if audio.content_type and audio.content_type.startswith("audio"):
-            await message.channel.send("🎧 Got your voice note. Transcribing and replying…")
-            transcript = await transcribe_audio(audio)
-            if not transcript:
-                await message.channel.send("❌ I couldn't transcribe that. Try again with a clearer recording.")
+        attachment = message.attachments[0]
+        if attachment.content_type and attachment.content_type.startswith("audio"):
+            await message.channel.send("🎧 Got your voice note. Transcribing + replying…")
+            text = await transcribe_audio(attachment)
+            if not text:
+                await message.channel.send("❌ Couldn't transcribe that. Try again.")
                 return
-            reply = await coach_answer(message.author.id, transcript)
+            reply = await coach_answer(message.author.id, text)
             if len(reply) <= 2000:
                 await message.channel.send(reply)
             else:
-                for chunk_start in range(0, len(reply), 1900):
-                    await message.channel.send(reply[chunk_start:chunk_start+1900])
-            await inc_metric(message.author.id, "audio_minutes_qna", 2)
+                for i in range(0, len(reply), 1900):
+                    await message.channel.send(reply[i:i+1900])
+            await incr_stat(message.author.id, "audio_minutes_qna", 2)
             return
 
+    # Normal text coaching
     reply = await coach_answer(message.author.id, message.content)
     if len(reply) <= 2000:
         await message.channel.send(reply)
     else:
-        for chunk_start in range(0, len(reply), 1900):
-            await message.channel.send(reply[chunk_start:chunk_start+1900])
+        for i in range(0, len(reply), 1900):
+            await message.channel.send(reply[i:i+1900])
 
-    await inc_metric(message.author.id, "messages_sent", 1)
-
-
-# -------------- Run bot -----------------
+# ============================================================
+# RUN BOT
+# ============================================================
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
