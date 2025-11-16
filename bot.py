@@ -214,7 +214,7 @@ async def transcribe_audio(attachment: discord.Attachment) -> Optional[str]:
         # 1) Read audio bytes from Discord
         raw = await attachment.read()
         if not raw:
-            logger.error("No audio data received from Discord attachment")
+            log.error("No audio data received from Discord attachment")
             return None
         
         # 2) Wrap in correct file-like object
@@ -227,15 +227,15 @@ async def transcribe_audio(attachment: discord.Attachment) -> Optional[str]:
         # 3) Correct transcription API call
         result = client_openai.audio.transcriptions.create(
             file=buf,
-            model="gpt-4o-mini-transcribe",   # also works: gpt-4o-transcribe
+            model="gpt-4o-mini-transcribe",
             response_format="text"
         )
 
-        logger.info("Transcription success: %s", filename)
+        log.info("Transcription success: %s", filename)
         return result
 
     except Exception as e:
-        logger.exception("Transcription error")
+        log.exception("Transcription error")
         return None
 
 async def analyze_call_transcript(transcript: str) -> str:
