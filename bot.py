@@ -2,19 +2,16 @@ import os
 import io
 import json
 import base64
-import asyncio
 from datetime import datetime, timezone, date, time
 
 import discord
-from discord.ext import commands
-from discord.ext import tasks
+from discord.ext import commands, tasks
 import aiohttp
-
-from asana_integration import AsanaClient
 
 from openai import OpenAI
 import redis.asyncio as redis
 
+from asana_integration import AsanaClient, WeeklySummary
 
 # ========= CONFIG =========
 
@@ -24,7 +21,7 @@ if not DISCORD_TOKEN:
 
 OPENAI_ASSISTANT_ID = os.getenv(
     "OPENAI_ASSISTANT_ID",
-    "asst_Fc3yRPdXjHUBlXNswxQ4q1TM",  # your assistant as default
+    "asst_Fc3yRPdXjHUBlXNswxQ4q1TM",  # your default assistant id
 )
 
 REDIS_URL = os.getenv("REDIS_URL")
@@ -38,7 +35,6 @@ MAX_IMAGES_PER_DAY = 50
 ADMIN_IDS_ENV = os.getenv("ADMIN_USER_IDS", "")
 ADMIN_IDS = {int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip().isdigit()}
 
-
 # ========= CLIENTS =========
 
 client_openai = OpenAI()
@@ -50,12 +46,11 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-asana_client: AsanaClient | None = None
-
+asana_client = None  # will be initialized in on_ready
 
 # ========= REDIS HELPERS =========
 
-async def get_user_discord_thread(user_id: int) -> int | None:
+async def get_user_discord_thread(user_id: int):
     v = await redis_client.get(f"user:{user_id}:discord_thread_id")
     return int(v) if v else None
 
@@ -79,7 +74,6 @@ async def get_or_create_openai_thread(user_id: int) -> str:
         return thread_id
     thread = client_openai.beta.threads.create()
     await set_user_openai_thread(user_id, thread.id)
-    # analytics
     await redis_client.incr("stats:openai_threads_created")
     return thread.id
 
@@ -102,10 +96,8 @@ async def can_generate_image(user_id: int) -> bool:
 async def record_generated_image(user_id: int) -> None:
     key = f"user:{user_id}:images_generated:{today_str()}"
     await redis_client.incr(key)
-    # expire after 3 days so keys don't grow forever
     await redis_client.expire(key, 3 * 24 * 3600)
     await increment_stat("stats:images_generated")
-
 
 # ========= MEMORY HELPERS =========
 
@@ -130,7 +122,6 @@ async def get_user_memory(user_id: int) -> dict:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return EMPTY_MEMORY.copy()
-    # ensure all keys exist
     mem = EMPTY_MEMORY.copy()
     mem.update({k: str(v) for k, v in data.items() if k in mem})
     return mem
@@ -141,7 +132,6 @@ async def save_user_memory(user_id: int, memory: dict) -> None:
 
 
 async def update_user_memory(user_id: int, new_text: str) -> None:
-    """Ask a small model to update classified memory JSON based on new text."""
     existing = await get_user_memory(user_id)
 
     prompt = f"""
@@ -168,7 +158,6 @@ Return ONLY valid JSON with the same top-level keys.
         )
         content = resp.output[0].content[0].text
         updated = json.loads(content)
-        # merge with default schema
         new_mem = EMPTY_MEMORY.copy()
         new_mem.update({k: str(v) for k, v in updated.items() if k in new_mem})
         await save_user_memory(user_id, new_mem)
@@ -198,29 +187,46 @@ def format_memory_for_discord(memory: dict) -> str:
         msg = msg[:1900] + "\n\n_(truncated)_"
     return msg
 
+# ========= RESCHEDULE HELPERS =========
+
+async def set_reschedule_pending(user_id: int, task_gids: list[str]) -> None:
+    key = f"user:{user_id}:resched_pending"
+    await redis_client.set(key, json.dumps(task_gids))
+    await redis_client.expire(key, 2 * 24 * 3600)
+
+
+async def get_reschedule_pending(user_id: int) -> list[str] | None:
+    key = f"user:{user_id}:resched_pending"
+    raw = await redis_client.get(key)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+async def clear_reschedule_pending(user_id: int) -> None:
+    key = f"user:{user_id}:resched_pending"
+    await redis_client.delete(key)
 
 # ========= OPENAI HELPERS =========
 
 async def run_assistant(thread_id: str, user_message: str) -> str:
-    """Send a message to your Assistant thread and return the latest reply text."""
-    # add user message to thread
     client_openai.beta.threads.messages.create(
         thread_id=thread_id,
         role="user",
         content=user_message,
     )
 
-    # run assistant
     run = client_openai.beta.threads.runs.create_and_poll(
         thread_id=thread_id,
         assistant_id=OPENAI_ASSISTANT_ID,
     )
 
-    # collect latest assistant message
     messages = client_openai.beta.threads.messages.list(thread_id=thread_id, limit=5)
     for msg in messages.data:
         if msg.role == "assistant":
-            # messages can have multiple parts
             parts = []
             for c in msg.content:
                 if c.type == "text":
@@ -232,10 +238,6 @@ async def run_assistant(thread_id: str, user_message: str) -> str:
 
 
 async def analyze_audio_transcript(transcript: str) -> str:
-    """
-    Use the Responses API to analyze a sales / setter / marketing call.
-    Includes red-flag detection and coaching.
-    """
     prompt = f"""
 You are a Christian sales and marketing call coach.
 Analyze the following call transcript for a Christian agency owner or coach.
@@ -273,7 +275,6 @@ Keep under 1500 characters if possible.
 
 
 async def generate_image(prompt: str) -> bytes:
-    """Generate an image and return PNG bytes."""
     img_resp = client_openai.images.generate(
         model="gpt-image-1",
         prompt=prompt,
@@ -310,9 +311,6 @@ async def analyze_image_with_gpt(image_url: str, extra_prompt: str | None = None
 
 
 async def analyze_pdf_bytes(pdf_bytes: bytes, filename: str) -> str:
-    """
-    Upload a PDF to OpenAI and ask for a marketing / sales focused analysis.
-    """
     file_obj = io.BytesIO(pdf_bytes)
     file_obj.name = filename
 
@@ -342,13 +340,11 @@ Return a response formatted for Discord, under ~1500 characters.
     )
     return resp.output[0].content[0].text[:1900]
 
-
 # ========= DISCORD EVENTS =========
 
 @bot.event
 async def on_ready():
     global asana_client
-    # init Asana client
     if asana_client is None:
         try:
             asana_client = AsanaClient()
@@ -356,12 +352,13 @@ async def on_ready():
         except Exception as e:
             print(f"AsanaClient not initialized: {e}")
 
-    # start daily Asana check-in loop
     if not daily_asana_checkin.is_running():
         daily_asana_checkin.start()
 
-    print(f"🤖 Bot ready — logged in as {bot.user} (id={bot.user.id})")
+    if not weekly_asana_review.is_running():
+        weekly_asana_review.start()
 
+    print(f"🤖 Bot ready — logged in as {bot.user} (id={bot.user.id})")
 
 # ========= COMMANDS =========
 
@@ -374,7 +371,6 @@ async def start(ctx: commands.Context):
     """
     await increment_stat("stats:commands_start")
 
-    # Only allow in text channels (not DMs)
     if not isinstance(ctx.channel, discord.TextChannel):
         await ctx.reply("Please use `!start` inside a server text channel, not in DMs.")
         return
@@ -389,7 +385,6 @@ async def start(ctx: commands.Context):
         if thread:
             await ctx.reply(f"You already have a thread: {thread.mention}")
         else:
-            # thread id stored but thread missing → create new one
             thread_name = f"{user.display_name}-ai"
             thread = await ctx.channel.create_thread(
                 name=thread_name,
@@ -446,7 +441,7 @@ async def start(ctx: commands.Context):
             "⚠️ Asana integration is not configured yet. Ask Derek to set ASANA_ACCESS_TOKEN / ASANA_TEMPLATE_GID."
         )
 
-    # 5) Welcome message in the thread (if it's new)
+    # 5) Welcome message in the thread
     if thread:
         await thread.send(
             f"Hey {user.mention}! 👋\n"
@@ -461,7 +456,6 @@ async def start(ctx: commands.Context):
             "• `!myinfo` – see what I remember about you\n"
             "• `!resetmemory` – wipe my memory of you\n"
         )
-
 
 @bot.command(name="myinfo")
 async def myinfo(ctx: commands.Context):
@@ -493,9 +487,6 @@ async def inspectmemory(ctx: commands.Context, user: discord.User | None = None)
 
 @bot.command(name="image")
 async def image_command(ctx: commands.Context, *, prompt: str):
-    """
-    Generate an image. Respects per-user daily limit.
-    """
     if not await can_generate_image(ctx.author.id):
         await ctx.reply(
             f"🚫 You've hit your daily image limit ({MAX_IMAGES_PER_DAY} per day). "
@@ -513,12 +504,8 @@ async def image_command(ctx: commands.Context, *, prompt: str):
     except Exception as e:
         await ctx.reply(f"❌ Image generation failed: `{e}`")
 
-
 @bot.command(name="analyzeimage")
 async def analyze_image_command(ctx: commands.Context, *, extra_prompt: str = ""):
-    """
-    Analyze an attached image (ad, thumbnail, etc.)
-    """
     if not ctx.message.attachments:
         await ctx.reply("Attach an image and run `!analyzeimage`.")
         return
@@ -545,12 +532,8 @@ async def analyze_image_command(ctx: commands.Context, *, extra_prompt: str = ""
     except Exception as e:
         await ctx.reply(f"❌ Image analysis failed: `{e}`")
 
-
 @bot.command(name="analyzepdf")
 async def analyze_pdf_command(ctx: commands.Context):
-    """
-    Analyze an attached PDF (offer doc, deck, script, etc.)
-    """
     if not ctx.message.attachments:
         await ctx.reply("Attach a PDF and run `!analyzepdf`.")
         return
@@ -578,9 +561,6 @@ async def analyze_pdf_command(ctx: commands.Context):
     except Exception as e:
         await ctx.reply(f"❌ PDF analysis failed: `{e}`")
 
-
-# ========= List Commands Command =====
-
 @bot.command(name="commands")
 async def commands_list(ctx: commands.Context):
     cmds = """
@@ -607,7 +587,6 @@ async def commands_list(ctx: commands.Context):
 """
     await ctx.reply(cmds)
 
-
 # ========= AUDIO PROCESSING =========
 
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".ogg", ".oga", ".webm", ".mp4")
@@ -621,18 +600,6 @@ def is_audio_attachment(att: discord.Attachment) -> bool:
 
 
 async def classify_audio_intent(transcript: str) -> str:
-    """
-    Classifies the audio into one of these categories:
-    - general_question
-    - sales_call
-    - setter_call
-    - discovery_call
-    - marketing_ideation
-    - faith_question
-    - personal_msg
-    - other
-    """
-
     prompt = f"""
 You are an intent classification engine.
 
@@ -670,14 +637,6 @@ Respond with ONLY the category name, nothing else.
 
 
 async def process_audio_message(message: discord.Message, user_id: int):
-    """
-    Full upgraded audio pipeline:
-    - Transcription
-    - Intent classification
-    - Route to correct handler
-    """
-
-    # 1. Grab the first audio attachment
     attachment = None
     for att in message.attachments:
         if is_audio_attachment(att):
@@ -705,14 +664,12 @@ async def process_audio_message(message: discord.Message, user_id: int):
         await message.channel.send(f"⚠️ Error transcribing audio: `{e}`")
         return
 
-    # 2. Intent Classification
     try:
         intent = await classify_audio_intent(text)
     except Exception as e:
         await message.channel.send(f"⚠️ Error classifying audio: `{e}`")
         intent = "general_question"
 
-    # 3. Route Based on Intent
     if intent in {"sales_call", "setter_call", "discovery_call"}:
         await message.channel.send("📞 Detected a call. Running call analysis...")
 
@@ -776,7 +733,6 @@ Respond as a Christian mentor, with scripture support.
         return
 
     else:
-        # Default: general question → treat it like a normal assistant chat
         await message.channel.send("🎤 Detected a general voice question. Answering your question...")
 
         openai_thread = await get_or_create_openai_thread(user_id)
@@ -789,19 +745,13 @@ Respond as a Christian mentor, with scripture support.
         except Exception as e:
             await message.channel.send(f"⚠️ Error answering your voice message: `{e}`")
 
-
 # ========= DAILY ASANA CHECK-IN =========
 
-@tasks.loop(time=time(hour=14, minute=0))  # ~8am CST = 14:00 UTC
+@tasks.loop(time=time(hour=14, minute=0))  # 14:00 UTC ~ 8am CST
 async def daily_asana_checkin():
-    """
-    Runs once a day. For every user that is a program member and has
-    an Asana project + a thread, post their daily agenda into their AI thread.
-    """
     if asana_client is None:
         return
 
-    # all program members (user ids) from Redis
     user_ids = await redis_client.hkeys("program_members")
     if not user_ids:
         return
@@ -817,14 +767,12 @@ async def daily_asana_checkin():
             if not project_gid:
                 continue
 
-            # look up their AI thread
             thread_id = await get_user_discord_thread(user_id)
-            channel: discord.abc.Messageable | None = None
+            channel = None
 
             if thread_id:
                 channel = bot.get_channel(thread_id)
 
-            # fallback: DM if we can't find the thread
             if channel is None:
                 user = bot.get_user(user_id)
                 if user:
@@ -844,42 +792,131 @@ async def daily_asana_checkin():
                 except Exception as e:
                     print(f"Failed to send daily Asana agenda to {user_id}: {e}")
 
+# ========= WEEKLY ASANA REVIEW (SUNDAY 8AM CST) =========
+
+@tasks.loop(time=time(hour=14, minute=0))  # 14:00 UTC ~ 8am CST
+async def weekly_asana_review():
+    if asana_client is None:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    # Sunday = 6 (Monday=0)
+    if now_utc.weekday() != 6:
+        return
+
+    user_ids = await redis_client.hkeys("program_members")
+    if not user_ids:
+        return
+
+    async with aiohttp.ClientSession() as session:
+        for user_id_str in user_ids:
+            try:
+                user_id = int(user_id_str)
+            except ValueError:
+                continue
+
+            project_gid = asana_client.get_project_for_user(user_id)
+            if not project_gid:
+                continue
+
+            thread_id = await get_user_discord_thread(user_id)
+            channel = None
+
+            if thread_id:
+                channel = bot.get_channel(thread_id)
+
+            if channel is None:
+                user = bot.get_user(user_id)
+                if user:
+                    channel = user.dm_channel or await user.create_dm()
+
+            if channel is None:
+                continue
+
+            summary = await asana_client.build_weekly_summary(
+                session=session,
+                discord_user_id=user_id,
+            )
+
+            if not summary:
+                continue
+
+            try:
+                await channel.send(summary.text)
+            except Exception as e:
+                print(f"Failed to send weekly summary to {user_id}: {e}")
+                continue
+
+            if len(summary.overdue_task_gids) >= 3:
+                try:
+                    await channel.send(
+                        "⏰ You have several overdue tasks in your 6-month plan.\n"
+                        "Would you like me to **reschedule them into next week**? (yes / no)"
+                    )
+                    await set_reschedule_pending(user_id, summary.overdue_task_gids)
+                except Exception as e:
+                    print(f"Failed to send reschedule prompt to {user_id}: {e}")
 
 # ========= AUTO-REPLY IN USER THREAD =========
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Let commands run first
     await bot.process_commands(message)
 
     if message.author.bot:
         return
 
-    # Check if this channel is a mapped AI thread for this user
     user_thread_id = await get_user_discord_thread(message.author.id)
     if not user_thread_id or message.channel.id != user_thread_id:
         return
 
-    # Ignore explicit commands inside the thread
     if message.content.startswith("!"):
         return
 
-    # If there is audio attached, treat as call analysis
+    # Handle reschedule yes/no replies
+    pending = await get_reschedule_pending(message.author.id)
+    if pending is not None:
+        reply_text = (message.content or "").strip().lower()
+
+        if reply_text in {"yes", "y", "yeah", "yep", "sure"}:
+            if asana_client:
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        await asana_client.reschedule_tasks(session, pending, days=3)
+                        await message.channel.send(
+                            "📆 Got it. I've rescheduled those overdue tasks into next week.\n"
+                            "Let's attack them fresh."
+                        )
+                    except Exception as e:
+                        await message.channel.send(
+                            f"⚠️ I tried to reschedule but hit an error: `{e}`"
+                        )
+            await clear_reschedule_pending(message.author.id)
+            return
+
+        elif reply_text in {"no", "n", "nope", "nah"}:
+            await message.channel.send(
+                "✅ No problem. We'll keep the current due dates.\n"
+                "If you change your mind, just tell me and I can help you adjust your plan."
+            )
+            await clear_reschedule_pending(message.author.id)
+            return
+        else:
+            await message.channel.send(
+                "Please reply with **yes** or **no** about rescheduling your overdue tasks."
+            )
+            return
+
+    # Audio attachments → call / voice processing
     if message.attachments and any(is_audio_attachment(att) for att in message.attachments):
         await process_audio_message(message, message.author.id)
         return
 
-    # Otherwise, treat as normal chat to the Assistant
     text = message.content.strip()
     if not text and not message.attachments:
-        return  # nothing to send
+        return
 
-    await message.channel.typing()
-
-    openai_thread_id = await get_or_create_openai_thread(message.author.id)
-
-    # If user attached non-audio files without using specific commands,
-    # just mention the available tools.
+    # If they attached a file but didn't use specific commands
     if message.attachments and not text:
         await message.channel.send(
             "📎 I see a file. For images use `!analyzeimage` with the image attached, "
@@ -888,19 +925,19 @@ async def on_message(message: discord.Message):
         )
         return
 
+    await message.channel.typing()
+
+    openai_thread_id = await get_or_create_openai_thread(message.author.id)
+
     try:
         reply = await run_assistant(openai_thread_id, text)
-        # Shorten if needed
         if len(reply) > 1900:
             reply = reply[:1900] + "\n\n_(truncated)_"
         await message.channel.send(reply)
-
-        # Update memory & analytics
         await update_user_memory(message.author.id, text)
         await increment_stat("stats:messages_handled")
     except Exception as e:
         await message.channel.send(f"⚠️ Error talking to the AI: `{e}`")
-
 
 # ========= RUN =========
 
