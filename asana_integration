@@ -2,8 +2,9 @@
 
 import os
 import json
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional
+from dataclasses import dataclass
 
 import aiohttp
 
@@ -33,6 +34,12 @@ def _save_mapping(mapping: Dict[str, str]) -> None:
     except Exception:
         # Don't crash the bot if saving fails
         pass
+
+
+@dataclass
+class WeeklySummary:
+    text: str
+    overdue_task_gids: List[str]
 
 
 class AsanaClient:
@@ -85,12 +92,10 @@ class AsanaClient:
         payload = {
             "data": {
                 "name": project_name,
-                # NOTE: You *can* add requested_dates / requested_roles here later
-                # to drive start/due dates from a "program start" date.
+                # You can add start_on/due_on in future if you want
             }
         }
 
-        # Instantiate project from project template
         # POST /project_templates/{project_template_gid}/instantiateProject
         data = await self._request(
             "POST",
@@ -100,13 +105,10 @@ class AsanaClient:
         )
 
         # Asana returns a "job" – we grab the new project GID from it
-        # Format is usually: { "data": { "new_project": { "gid": "...", ... }, ... } }
         job = data.get("data", {})
         new_project = job.get("new_project") or job.get("project") or {}
         project_gid = new_project.get("gid")
         if not project_gid:
-            # Fallback: Asana might now return job only; in that case you'd have to poll.
-            # For now, we just raise so you see the response in logs.
             raise RuntimeError(f"Could not find new project gid in Asana response: {data}")
 
         self._user_projects[user_key] = project_gid
@@ -116,7 +118,7 @@ class AsanaClient:
     def get_project_for_user(self, discord_user_id: int) -> Optional[str]:
         return self._user_projects.get(str(discord_user_id))
 
-    # ---------- task reading & agenda building ----------
+    # ---------- task reading ----------
 
     async def _get_project_tasks(
         self,
@@ -129,7 +131,7 @@ class AsanaClient:
         params = {
             "project": project_gid,
             "opt_fields": (
-                "name,completed,due_on,permalink_url,"
+                "name,completed,completed_at,due_on,permalink_url,"
                 "memberships.section.name"
             ),
             "limit": 100,
@@ -146,6 +148,18 @@ class AsanaClient:
             return datetime.strptime(due_on, "%Y-%m-%d").date()
         except Exception:
             return None
+
+    @staticmethod
+    def _parse_completed_at(completed_at: Optional[str]) -> Optional[date]:
+        if not completed_at:
+            return None
+        try:
+            # Asana timestamps look like "2025-01-01T12:34:56.000Z"
+            return datetime.fromisoformat(completed_at.replace("Z", "+00:00")).date()
+        except Exception:
+            return None
+
+    # ---------- daily agenda ----------
 
     async def build_daily_agenda(
         self,
@@ -186,7 +200,7 @@ class AsanaClient:
             }
 
             if due_on is None:
-                # No due date – treat as upcoming backlog but not in "today"
+                # No due date – skip from daily/weekly logic
                 continue
             elif due_on < today:
                 overdue.append(entry)
@@ -231,3 +245,117 @@ class AsanaClient:
         )
 
         return "\n".join(lines)
+
+    # ---------- weekly summary + reschedule ----------
+
+    async def build_weekly_summary(
+        self,
+        session: aiohttp.ClientSession,
+        discord_user_id: int,
+    ) -> Optional[WeeklySummary]:
+        """
+        Build a weekly summary text and collect overdue task gids.
+        """
+        project_gid = self.get_project_for_user(discord_user_id)
+        if not project_gid:
+            return None
+
+        tasks = await self._get_project_tasks(session, project_gid)
+
+        today = date.today()
+        week_start = today - timedelta(days=7)
+
+        completed_this_week = 0
+        overdue_tasks: List[dict] = []
+
+        for t in tasks:
+            name = t.get("name", "Untitled task")
+            url = t.get("permalink_url")
+            memberships = t.get("memberships") or []
+            section_name = None
+            if memberships:
+                section = memberships[0].get("section") or {}
+                section_name = section.get("name")
+
+            completed = t.get("completed", False)
+            due_on = self._parse_due_on(t.get("due_on"))
+            completed_at = self._parse_completed_at(t.get("completed_at"))
+
+            if completed and completed_at and week_start <= completed_at <= today:
+                completed_this_week += 1
+
+            if (not completed) and due_on and due_on < today:
+                overdue_tasks.append(
+                    {
+                        "gid": t.get("gid"),
+                        "name": name,
+                        "url": url,
+                        "section": section_name,
+                        "due_on": due_on,
+                    }
+                )
+
+        lines: List[str] = []
+        lines.append("**📆 Weekly Review (Asana Program)**\n")
+
+        lines.append(f"**✅ Tasks completed this week:** {completed_this_week}")
+        lines.append(f"**⚠️ Tasks currently overdue:** {len(overdue_tasks)}")
+        lines.append("")
+
+        if overdue_tasks:
+            lines.append("Here are some of the overdue tasks:")
+            for e in overdue_tasks[:8]:
+                sec = f" ({e['section']})" if e["section"] else ""
+                when = f" (was due {e['due_on'].isoformat()})"
+                link = f" – [Open in Asana]({e['url']})" if e["url"] else ""
+                lines.append(f"- {e['name']}{sec}{when}{link}")
+            lines.append("")
+
+        # Light faith / hybrid tone
+        if completed_this_week == 0 and overdue_tasks:
+            lines.append(
+                "_This week was slower. That's okay — but let's recommit. Steward the work God has given you and let's move these forward._"
+            )
+        elif completed_this_week > 0 and overdue_tasks:
+            lines.append(
+                "_Good progress, but there's still weight on the board. Let's clear these overdue tasks so you can step into the next level._"
+            )
+        elif completed_this_week > 0 and not overdue_tasks:
+            lines.append(
+                "_Great job staying on top of your roadmap this week. Keep being faithful with the work in front of you._"
+            )
+        else:
+            lines.append(
+                "_This week was quiet. Let's make next week a focused one with clear, completed actions._"
+            )
+
+        overdue_gids = [t["gid"] for t in overdue_tasks if t.get("gid")]
+
+        text = "\n".join(lines)
+        if len(text) > 1800:
+            text = text[:1800] + "\n\n_(truncated)_"
+
+        return WeeklySummary(text=text, overdue_task_gids=overdue_gids)
+
+    async def reschedule_tasks(
+        self,
+        session: aiohttp.ClientSession,
+        task_gids: List[str],
+        days: int = 3,
+    ) -> None:
+        """
+        Push overdue tasks forward by `days` days from today.
+        """
+        if not task_gids:
+            return
+        new_due = (date.today() + timedelta(days=days)).isoformat()
+        for gid in task_gids:
+            try:
+                await self._request(
+                    "PUT",
+                    f"/tasks/{gid}",
+                    session,
+                    json={"data": {"due_on": new_due}},
+                )
+            except Exception as e:
+                print(f"[Asana] Failed to reschedule task {gid}: {e}")
