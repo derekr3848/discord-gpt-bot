@@ -206,17 +206,36 @@ async def generate_image(prompt: str, user_id: int) -> Optional[bytes]:
 # ============================================================
 
 async def transcribe_audio(attachment: discord.Attachment) -> Optional[str]:
+    """
+    Download a Discord audio attachment and send it to OpenAI for transcription.
+    Compatible with Discord voice notes (.aac, .mp4, .webm)
+    """
     try:
-        buf = io.BytesIO()
-        await attachment.save(buf)
-        buf.seek(0)
-        transcript = client_openai.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=("audio.webm", buf, attachment.content_type or "audio/webm"),
+        # 1) Read audio bytes from Discord
+        raw = await attachment.read()
+        if not raw:
+            logger.error("No audio data received from Discord attachment")
+            return None
+        
+        # 2) Wrap in correct file-like object
+        buf = io.BytesIO(raw)
+        
+        # MUST set a filename or OpenAI rejects it
+        filename = attachment.filename or "audio.m4a"
+        buf.name = filename  
+
+        # 3) Correct transcription API call
+        result = client_openai.audio.transcriptions.create(
+            file=buf,
+            model="gpt-4o-mini-transcribe",   # also works: gpt-4o-transcribe
+            response_format="text"
         )
-        return getattr(transcript, "text", None)
-    except Exception:
-        log.exception("Transcription error")
+
+        logger.info("Transcription success: %s", filename)
+        return result
+
+    except Exception as e:
+        logger.exception("Transcription error")
         return None
 
 async def analyze_call_transcript(transcript: str) -> str:
