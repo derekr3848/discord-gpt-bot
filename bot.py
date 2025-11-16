@@ -524,40 +524,175 @@ def is_audio_attachment(att: discord.Attachment) -> bool:
     return fname.endswith(AUDIO_EXTENSIONS)
 
 
+async def classify_audio_intent(transcript: str) -> str:
+    """
+    Classifies the audio into one of these categories:
+    - general_question
+    - sales_call
+    - setter_call
+    - discovery_call
+    - marketing_ideation
+    - faith_question
+    - personal_msg
+    - other
+    """
+
+    prompt = f"""
+You are an intent classification engine.
+
+Classify this audio transcript into EXACTLY ONE of these categories:
+
+- general_question   (user asking something, no call happening)
+- sales_call         (rep speaking to a prospect)
+- setter_call        (appointment setter calling a lead)
+- discovery_call     (initial qualification call)
+- marketing_ideation (user brainstorming content, ads, creative ideas)
+- faith_question     (user asking biblical/spiritual questions)
+- personal_msg       (casual personal message, stories, diary-style)
+- other
+
+Transcript:
+\"\"\"{transcript[:6000]}\"\"\"
+
+Respond with ONLY the category name, nothing else.
+"""
+
+    resp = client_openai.responses.create(
+        model="gpt-4.1-mini",
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt}
+                ]
+            }
+        ]
+    )
+
+    label = resp.output[0].content[0].text.strip().lower()
+    return label
+
+
 async def process_audio_message(message: discord.Message, user_id: int):
     """
-    Handle audio uploads / mobile voice messages inside the user's AI thread.
+    Full upgraded audio pipeline:
+    - Transcription
+    - Intent classification
+    - Route to correct handler
     """
-    for att in message.attachments:
-        if not is_audio_attachment(att):
-            continue
 
-        await message.channel.send("🎧 Received audio. Transcribing your call...")
+    # 1. Grab the first audio attachment
+    attachment = None
+    for att in message.attachments:
+        if is_audio_attachment(att):
+            attachment = att
+            break
+
+    if not attachment:
+        return
+
+    await message.channel.send("🎧 Received your voice message. Transcribing...")
+
+    try:
+        audio_bytes = await attachment.read()
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = attachment.filename
+
+        transcription = client_openai.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=audio_file,
+        )
+        text = transcription.text
+
+        await message.channel.send("📝 Transcription done. Understanding your message...")
+    except Exception as e:
+        await message.channel.send(f"⚠️ Error transcribing audio: `{e}`")
+        return
+
+    # 2. Intent Classification
+    try:
+        intent = await classify_audio_intent(text)
+    except Exception as e:
+        await message.channel.send(f"⚠️ Error classifying audio: `{e}`")
+        intent = "general_question"
+
+    # 3. Route Based on Intent
+    if intent in {"sales_call", "setter_call", "discovery_call"}:
+        await message.channel.send("📞 Detected a call. Running call analysis...")
+
+        analysis = await analyze_audio_transcript(text)
+
+        await message.channel.send(analysis)
+        await increment_stat("stats:audio_items_analyzed")
+        await update_user_memory(user_id, text)
+        return
+
+    elif intent == "marketing_ideation":
+        await message.channel.send("🎨 Detected marketing brainstorming. Analyzing...")
+
+        marketing_prompt = f"""
+User is brainstorming marketing/ads/creative ideas.
+
+Transcript:
+\"\"\"{text}\"\"\"
+
+Give:
+- creative directions
+- hooks
+- angles
+- improvements
+- examples and variations
+"""
+        resp = client_openai.responses.create(
+            model="gpt-4.1-mini",
+            input=[{
+                "role": "user",
+                "content": [{"type": "input_text", "text": marketing_prompt}]
+            }]
+        )
+        reply = resp.output[0].content[0].text[:1900]
+
+        await message.channel.send(reply)
+        await update_user_memory(user_id, text)
+        return
+
+    elif intent == "faith_question":
+        await message.channel.send("✝️ Detected faith-based question. Answering...")
+
+        faith_prompt = f"""
+User is asking a faith/biblical/spiritual question.
+
+Transcript:
+\"\"\"{text}\"\"\"
+
+Respond as a Christian mentor, with scripture support.
+"""
+        resp = client_openai.responses.create(
+            model="gpt-4.1-mini",
+            input=[{
+                "role": "user",
+                "content": [{"type": "input_text", "text": faith_prompt}]
+            }]
+        )
+        reply = resp.output[0].content[0].text[:1900]
+
+        await message.channel.send(reply)
+        return
+
+    else:
+        # Default: general question → treat it like a normal assistant chat
+        await message.channel.send("🎤 Detected a general voice question. Answering your question...")
+
+        openai_thread = await get_or_create_openai_thread(user_id)
 
         try:
-            audio_bytes = await att.read()
-            audio_file = io.BytesIO(audio_bytes)
-            audio_file.name = att.filename
-
-            transcription = client_openai.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
-                file=audio_file,
-            )
-            text = transcription.text
-
-            await message.channel.send("📝 Transcription complete. Analyzing now...")
-
-            analysis = await analyze_audio_transcript(text)
-            await message.channel.send(analysis)
-
-            # Update memory & analytics
+            reply = await run_assistant(openai_thread, text)
+            await message.channel.send(reply[:1900])
             await update_user_memory(user_id, text)
             await increment_stat("stats:audio_items_analyzed")
         except Exception as e:
-            await message.channel.send(f"⚠️ Error processing audio: `{e}`")
+            await message.channel.send(f"⚠️ Error answering your voice message: `{e}`")
 
-        # Only process first audio attachment for now
-        break
 
 
 # ========= AUTO-REPLY IN USER THREAD =========
