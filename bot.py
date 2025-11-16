@@ -355,9 +355,6 @@ async def create_asana_project_for_user(user: discord.User, onboarding: Dict[str
     }
 }
 
-        }
-    }
-
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload) as resp:
