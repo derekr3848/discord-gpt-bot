@@ -1,476 +1,623 @@
 import os
-import asyncio
-import logging
-import textwrap
+import io
+import json
 import base64
-from io import BytesIO
+import asyncio
+from datetime import datetime, timezone
 
-import aiohttp
 import discord
 from discord.ext import commands
 
-try:
-    import redis.asyncio as redis
-except ImportError:
-    redis = None  # We'll fall back to an in-memory store if redis isn't available
-
 from openai import OpenAI
+import redis.asyncio as redis
 
-# ------------------------
-# Configuration / Globals
-# ------------------------
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("discord-gpt-bot")
+# ========= CONFIG =========
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID") or "asst_Fc3yRPdXjHUBlXNswxQ4q1TM"
-OPENAI_AUDIO_ASSISTANT_ID = os.getenv("OPENAI_AUDIO_ASSISTANT_ID") or OPENAI_ASSISTANT_ID
-REDIS_URL = os.getenv("REDIS_URL")
-
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN is not set")
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is not set")
+OPENAI_ASSISTANT_ID = os.getenv(
+    "OPENAI_ASSISTANT_ID",
+    "asst_Fc3yRPdXjHUBlXNswxQ4q1TM",  # your assistant as default
+)
 
-client_openai = OpenAI(api_key=OPENAI_API_KEY)
+REDIS_URL = os.getenv("REDIS_URL")
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL is not set (Redis add-on on Railway)")
 
-IMAGE_MODEL = "gpt-image-1"
-TRANSCRIBE_MODEL = "whisper-1"
+# Max images per user per day
+MAX_IMAGES_PER_DAY = 50
 
-# Keys in redis / memory
-def key_user_thread(user_id: int) -> str:
-    return f"user_thread:{user_id}"
-
-def key_user_openai_thread(user_id: int) -> str:
-    return f"user_openai_thread:{user_id}"
-
-
-# ------------------------
-# Simple async key-value store
-# ------------------------
-
-class MemoryStore:
-    """Generic async key/value interface. Uses Redis if available, else in-memory dict."""
-    def __init__(self):
-        self._use_redis = False
-        self._redis = None
-        self._dict = {}
-
-        if REDIS_URL and redis is not None:
-            try:
-                self._redis = redis.from_url(REDIS_URL)
-                self._use_redis = True
-                logger.info("Using Redis for memory: %s", REDIS_URL)
-            except Exception as e:
-                logger.warning("Failed to connect to Redis (%s), falling back to in-memory store", e)
-        else:
-            logger.info("REDIS_URL not set or redis not installed – using in-memory store")
-
-    async def get(self, key: str):
-        if self._use_redis:
-            val = await self._redis.get(key)
-            if val is None:
-                return None
-            return val.decode("utf-8") if isinstance(val, (bytes, bytearray)) else val
-        return self._dict.get(key)
-
-    async def set(self, key: str, value: str):
-        if self._use_redis:
-            await self._redis.set(key, value)
-        else:
-            self._dict[key] = value
-
-    async def close(self):
-        if self._use_redis and self._redis is not None:
-            await self._redis.close()
+# Admins who can use !inspectmemory
+ADMIN_IDS_ENV = os.getenv("ADMIN_USER_IDS", "")
+ADMIN_IDS = {int(x.strip()) for x in ADMIN_IDS_ENV.split(",") if x.strip().isdigit()}
 
 
-memory_store = MemoryStore()
+# ========= CLIENTS =========
 
-
-# ------------------------
-# Discord Bot Setup
-# ------------------------
+client_openai = OpenAI()
+redis_client = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
 
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
-intents.guilds = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ------------------------
-# Utility helpers
-# ------------------------
+# ========= REDIS HELPERS =========
 
-def split_message(text: str, limit: int = 1900):
-    """Split a long string into chunks safe for Discord."""
-    if not text:
-        return []
-    lines = text.splitlines(keepends=True)
-    chunks = []
-    current = ""
-    for line in lines:
-        if len(current) + len(line) > limit:
-            chunks.append(current)
-            current = line
-        else:
-            current += line
-    if current:
-        chunks.append(current)
-    return chunks
+async def get_user_discord_thread(user_id: int) -> int | None:
+    v = await redis_client.get(f"user:{user_id}:discord_thread_id")
+    return int(v) if v else None
 
 
-def sync_openai_chat(thread_id: str | None, user_message: str, assistant_id: str):
-    """
-    Synchronous helper to talk to the OpenAI Assistants API.
-    Returns (thread_id, reply_text).
-    """
-    # Ensure thread exists
-    if thread_id is None:
-        thread = client_openai.beta.threads.create()
-        thread_id = thread.id
+async def set_user_discord_thread(user_id: int, thread_id: int) -> None:
+    await redis_client.set(f"user:{user_id}:discord_thread_id", str(thread_id))
+    await redis_client.set(f"thread:{thread_id}:user_id", str(user_id))
 
-    # Add the user message
+
+async def get_user_openai_thread(user_id: int) -> str | None:
+    return await redis_client.get(f"user:{user_id}:openai_thread_id")
+
+
+async def set_user_openai_thread(user_id: int, thread_id: str) -> None:
+    await redis_client.set(f"user:{user_id}:openai_thread_id", thread_id)
+
+
+async def get_or_create_openai_thread(user_id: int) -> str:
+    thread_id = await get_user_openai_thread(user_id)
+    if thread_id:
+        return thread_id
+    thread = client_openai.beta.threads.create()
+    await set_user_openai_thread(user_id, thread.id)
+    # analytics
+    await redis_client.incr("stats:openai_threads_created")
+    return thread.id
+
+
+async def increment_stat(key: str, amount: int = 1) -> None:
+    await redis_client.incr(key, amount)
+
+
+def today_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+async def can_generate_image(user_id: int) -> bool:
+    """Check 50 images/day limit per user."""
+    key = f"user:{user_id}:images_generated:{today_str()}"
+    current = int(await redis_client.get(key) or 0)
+    return current < MAX_IMAGES_PER_DAY
+
+
+async def record_generated_image(user_id: int) -> None:
+    key = f"user:{user_id}:images_generated:{today_str()}"
+    await redis_client.incr(key)
+    # expire after 3 days so keys don't grow forever
+    await redis_client.expire(key, 3 * 24 * 3600)
+    await increment_stat("stats:images_generated")
+
+
+# ========= MEMORY HELPERS =========
+
+EMPTY_MEMORY = {
+    "profile": "",
+    "business": "",
+    "goals": "",
+    "pains": "",
+    "roadblocks": "",
+    "triggers": "",
+    "budget": "",
+    "timeline": "",
+    "notes": "",
+}
+
+
+async def get_user_memory(user_id: int) -> dict:
+    raw = await redis_client.get(f"user:{user_id}:memory")
+    if not raw:
+        return EMPTY_MEMORY.copy()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return EMPTY_MEMORY.copy()
+    # ensure all keys exist
+    mem = EMPTY_MEMORY.copy()
+    mem.update({k: str(v) for k, v in data.items() if k in mem})
+    return mem
+
+
+async def save_user_memory(user_id: int, memory: dict) -> None:
+    await redis_client.set(f"user:{user_id}:memory", json.dumps(memory))
+
+
+async def update_user_memory(user_id: int, new_text: str) -> None:
+    """Ask a small model to update classified memory JSON based on new text."""
+    existing = await get_user_memory(user_id)
+
+    prompt = f"""
+You are a CRM memory engine for a Christian agency coaching assistant.
+
+You store what you learn about each user in this JSON format:
+
+{json.dumps(EMPTY_MEMORY, indent=2)}
+
+Existing memory for this user (JSON):
+{json.dumps(existing, indent=2)}
+
+New message or transcript from the user:
+\"\"\"{new_text.strip()[:6000]}\"\"\"
+
+Update the JSON, improving and filling in fields where appropriate.
+Return ONLY valid JSON with the same top-level keys.
+"""
+
+    try:
+        resp = client_openai.responses.create(
+            model="gpt-4.1-mini",
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+        )
+        content = resp.output[0].content[0].text
+        updated = json.loads(content)
+        # merge with default schema
+        new_mem = EMPTY_MEMORY.copy()
+        new_mem.update({k: str(v) for k, v in updated.items() if k in new_mem})
+        await save_user_memory(user_id, new_mem)
+    except Exception as e:
+        print(f"[MEMORY] Failed to update memory for {user_id}: {e}")
+
+
+def format_memory_for_discord(memory: dict) -> str:
+    parts = []
+    for k, label in [
+        ("profile", "Profile"),
+        ("business", "Business"),
+        ("goals", "Goals"),
+        ("pains", "Pains"),
+        ("roadblocks", "Roadblocks"),
+        ("triggers", "Buying Triggers"),
+        ("budget", "Budget"),
+        ("timeline", "Timeline"),
+        ("notes", "Notes"),
+    ]:
+        v = memory.get(k, "").strip()
+        if not v:
+            v = "_(nothing yet)_"
+        parts.append(f"**{label}:** {v}")
+    msg = "\n".join(parts)
+    if len(msg) > 1900:
+        msg = msg[:1900] + "\n\n_(truncated)_"
+    return msg
+
+
+# ========= OPENAI HELPERS =========
+
+async def run_assistant(thread_id: str, user_message: str) -> str:
+    """Send a message to your Assistant thread and return the latest reply text."""
+    # add user message to thread
     client_openai.beta.threads.messages.create(
         thread_id=thread_id,
         role="user",
         content=user_message,
     )
 
-    # Run the assistant
+    # run assistant
     run = client_openai.beta.threads.runs.create_and_poll(
         thread_id=thread_id,
-        assistant_id=assistant_id,
+        assistant_id=OPENAI_ASSISTANT_ID,
     )
 
-    if run.status != "completed":
-        raise RuntimeError(f"Assistant run not completed (status={run.status})")
-
-    # Get latest assistant message
-    messages = client_openai.beta.threads.messages.list(
-        thread_id=thread_id, order="desc", limit=1
-    )
-
-    reply_text = ""
-    if messages.data:
-        msg = messages.data[0]
-        # Find first text part
-        for part in msg.content:
-            if part.type == "text":
-                reply_text = part.text.value
-                break
-
-    return thread_id, reply_text or "I couldn't generate a response."
+    # collect latest assistant message
+    messages = client_openai.beta.threads.messages.list(thread_id=thread_id, limit=5)
+    for msg in messages.data:
+        if msg.role == "assistant":
+            # messages can have multiple parts
+            parts = []
+            for c in msg.content:
+                if c.type == "text":
+                    parts.append(c.text.value)
+            text = "\n".join(parts).strip()
+            if text:
+                return text
+    return "I couldn't generate a response, please try again."
 
 
-async def chat_with_assistant(thread_id: str | None, user_message: str, assistant_id: str):
-    """Async wrapper around sync_openai_chat."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, sync_openai_chat, thread_id, user_message, assistant_id
-    )
-
-
-def sync_generate_image(prompt: str) -> bytes:
+async def analyze_audio_transcript(transcript: str) -> str:
     """
-    Generate an image via gpt-image-1 and return PNG bytes.
+    Use the Responses API to analyze a sales / setter / marketing call.
+    Includes red-flag detection and coaching.
     """
-    result = client_openai.images.generate(
-        model=IMAGE_MODEL,
+    prompt = f"""
+You are a Christian sales and marketing call coach.
+Analyze the following call transcript for a Christian agency owner or coach.
+
+Transcript:
+\"\"\"{transcript.strip()[:8000]}\"\"\"
+
+Do ALL of the following clearly and concisely:
+
+1) Give a short summary of the call.
+2) Break down what the rep did WELL and what they did POORLY.
+3) Coach them on exactly how to improve.
+
+4) VERY IMPORTANT: Detect and list red flags in these categories:
+   💸 Budget flags
+   🟧 Timeline objections
+   😕 Uncertainty indicators
+   🚫 Bad fit warnings
+   🧊 Lead coldness signals
+   💀 "Never buying" traits
+
+For each category, output EITHER:
+- "None detected", OR
+- A bullet list with specific quotes/behaviors.
+
+Return a response formatted for Discord with clear headings and bullet points.
+Keep under 1500 characters if possible.
+"""
+
+    resp = client_openai.responses.create(
+        model="gpt-4.1-mini",
+        input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+    )
+    return resp.output[0].content[0].text[:1900]
+
+
+async def generate_image(prompt: str) -> bytes:
+    """Generate an image and return PNG bytes."""
+    img_resp = client_openai.images.generate(
+        model="gpt-image-1",
         prompt=prompt,
         size="1024x1024",
         n=1,
+        response_format="b64_json",
     )
-    img_b64 = result.data[0].b64_json
-    return base64.b64decode(img_b64)
+    b64 = img_resp.data[0].b64_json
+    return base64.b64decode(b64)
 
 
-async def generate_image_bytes(prompt: str) -> bytes:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, sync_generate_image, prompt)
+async def analyze_image_with_gpt(image_url: str, extra_prompt: str | None = None) -> str:
+    prompt = (
+        "You are a creative director for Christian agency owners and coaches. "
+        "Analyze this image like it's an ad / creative / piece of content. "
+        "Give feedback on hook, clarity, scroll-stopping power, and what to change."
+    )
+    if extra_prompt:
+        prompt += f"\n\nUser request: {extra_prompt}"
+
+    resp = client_openai.responses.create(
+        model="gpt-4.1-mini",
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_url": {"url": image_url}},
+                ],
+            }
+        ],
+    )
+    return resp.output[0].content[0].text[:1900]
 
 
-def sync_transcribe_audio(data: bytes, filename: str) -> str:
+async def analyze_pdf_bytes(pdf_bytes: bytes, filename: str) -> str:
     """
-    Transcribe audio bytes via Whisper.
+    Upload a PDF to OpenAI and ask for a marketing / sales focused analysis.
     """
-    from tempfile import NamedTemporaryFile
+    file_obj = io.BytesIO(pdf_bytes)
+    file_obj.name = filename
 
-    with NamedTemporaryFile(suffix=os.path.splitext(filename)[1] or ".mp3") as tmp:
-        tmp.write(data)
-        tmp.flush()
-        audio_file = open(tmp.name, "rb")
-        try:
-            transcript = client_openai.audio.transcriptions.create(
-                model=TRANSCRIBE_MODEL,
-                file=audio_file,
-            )
-        finally:
-            audio_file.close()
-    return transcript.text
+    uploaded = client_openai.files.create(
+        file=file_obj,
+        purpose="assistants",
+    )
+
+    prompt = """
+You are a strategic marketing and sales consultant for Christian agency owners and coaches.
+Analyze this PDF document. Summarize the key ideas, identify strengths and weaknesses, and
+give 3–7 concrete recommendations to improve the offer, messaging, and clarity.
+Return a response formatted for Discord, under ~1500 characters.
+"""
+
+    resp = client_openai.responses.create(
+        model="gpt-4.1-mini",
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_file", "file_id": uploaded.id},
+                ],
+            }
+        ],
+    )
+    return resp.output[0].content[0].text[:1900]
 
 
-async def transcribe_audio(data: bytes, filename: str) -> str:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, sync_transcribe_audio, data, filename)
+# ========= DISCORD EVENTS =========
+
+@bot.event
+async def on_ready():
+    print(f"🤖 Bot ready — logged in as {bot.user} (id={bot.user.id})")
 
 
-async def download_attachment(attachment: discord.Attachment) -> bytes:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(attachment.url) as resp:
-            resp.raise_for_status()
-            return await resp.read()
+# ========= COMMANDS =========
 
-
-# ------------------------
-# Per-user AI thread helpers
-# ------------------------
-
-async def get_or_create_user_thread(ctx_channel: discord.TextChannel, user: discord.Member) -> discord.Thread:
+@bot.command(name="start")
+async def start(ctx: commands.Context):
     """
-    Get the user's dedicated AI thread for this guild, or create it.
-    The thread ID is stored in memory_store keyed by the user ID.
+    Create (or recall) the user's private AI thread in this channel.
+    All chat in that thread goes straight to your Assistant.
     """
-    stored_thread_id = await memory_store.get(key_user_thread(user.id))
-    if stored_thread_id:
-        thread = ctx_channel.guild.get_thread(int(stored_thread_id))
-        if thread and not thread.archived:
-            return thread
+    await increment_stat("stats:commands_start")
 
-    # Create a new thread in the current channel
-    thread_name = f"{user.display_name} × Derek AI"
-    thread = await ctx_channel.create_thread(
+    # Only allow in text channels (not DMs)
+    if not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.reply("Please use `!start` inside a server text channel, not in DMs.")
+        return
+
+    existing_thread_id = await get_user_discord_thread(ctx.author.id)
+    if existing_thread_id:
+        thread = ctx.channel.guild.get_thread(existing_thread_id)
+        if thread:
+            await ctx.reply(f"You already have a thread: {thread.mention}")
+            return
+
+    # Create new private thread
+    thread_name = f"{ctx.author.display_name}-ai"
+    thread = await ctx.channel.create_thread(
         name=thread_name,
-        type=discord.ChannelType.public_thread,
+        type=discord.ChannelType.private_thread,
+        reason="Personal AI coaching thread",
+    )
+    await thread.add_user(ctx.author)
+
+    await set_user_discord_thread(ctx.author.id, thread.id)
+    await get_or_create_openai_thread(ctx.author.id)
+    await increment_stat("stats:threads_created")
+
+    await thread.send(
+        f"Hey {ctx.author.mention}! 👋\n"
+        "This is your private AI thread.\n"
+        "Just talk to me here — no command needed.\n\n"
+        "Things I can do:\n"
+        "• Chat coaching on sales, setters, Meta ads, YouTube, organic, and marketing\n"
+        "• Analyze *audio* (drop mobile voice messages or call recordings here)\n"
+        "• `!image <prompt>` – generate ads / creatives (50 images/day)\n"
+        "• `!analyzeimage` (with an image attached) – feedback on your creative\n"
+        "• `!analyzepdf` (with a PDF attached) – review your docs/decks\n"
+        "• `!myinfo` – see what I remember about you\n"
+        "• `!resetmemory` – wipe my memory of you\n"
     )
 
-    await memory_store.set(key_user_thread(user.id), str(thread.id))
-    return thread
+    await ctx.reply(f"Your AI thread is ready: {thread.mention}")
 
 
-async def get_user_openai_thread_id(user: discord.abc.User) -> str | None:
-    return await memory_store.get(key_user_openai_thread(user.id))
+@bot.command(name="myinfo")
+async def myinfo(ctx: commands.Context):
+    mem = await get_user_memory(ctx.author.id)
+    msg = format_memory_for_discord(mem)
+    await ctx.reply(f"🧠 **Here's what I remember about you:**\n\n{msg}")
 
 
-async def set_user_openai_thread_id(user: discord.abc.User, thread_id: str):
-    await memory_store.set(key_user_openai_thread(user.id), thread_id)
+@bot.command(name="resetmemory")
+async def resetmemory(ctx: commands.Context):
+    await redis_client.delete(f"user:{ctx.author.id}:memory")
+    await ctx.reply("🧹 Memory wiped. I no longer remember your profile. Start talking and I’ll relearn.")
+
+
+@bot.command(name="inspectmemory")
+async def inspectmemory(ctx: commands.Context, user: discord.User | None = None):
+    if ctx.author.id not in ADMIN_IDS:
+        await ctx.reply("❌ You don't have permission to use this command.")
+        return
+
+    if not user:
+        await ctx.reply("Usage: `!inspectmemory @user`")
+        return
+
+    mem = await get_user_memory(user.id)
+    msg = format_memory_for_discord(mem)
+    await ctx.reply(f"🧠 **Memory for {user.mention}:**\n\n{msg}")
+
+
+@bot.command(name="image")
+async def image_command(ctx: commands.Context, *, prompt: str):
+    """
+    Generate an image. Respects per-user daily limit.
+    """
+    if not await can_generate_image(ctx.author.id):
+        await ctx.reply(
+            f"🚫 You've hit your daily image limit ({MAX_IMAGES_PER_DAY} per day). "
+            "Try again tomorrow."
+        )
+        return
+
+    await ctx.reply("🎨 Generating image, one sec...")
+
+    try:
+        png_bytes = await generate_image(prompt)
+        file = discord.File(io.BytesIO(png_bytes), filename="image.png")
+        await ctx.reply(file=file)
+        await record_generated_image(ctx.author.id)
+    except Exception as e:
+        await ctx.reply(f"❌ Image generation failed: `{e}`")
+
+
+@bot.command(name="analyzeimage")
+async def analyze_image_command(ctx: commands.Context, *, extra_prompt: str = ""):
+    """
+    Analyze an attached image (ad, thumbnail, etc.)
+    """
+    if not ctx.message.attachments:
+        await ctx.reply("Attach an image and run `!analyzeimage`.")
+        return
+
+    img = None
+    for att in ctx.message.attachments:
+        if att.content_type and att.content_type.startswith("image/"):
+            img = att
+            break
+        if att.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+            img = att
+            break
+
+    if not img:
+        await ctx.reply("I don't see an image attachment. Try again with a PNG/JPG/etc.")
+        return
+
+    await ctx.reply("🧐 Analyzing your image...")
+
+    try:
+        analysis = await analyze_image_with_gpt(img.url, extra_prompt)
+        await ctx.reply(analysis)
+        await increment_stat("stats:images_analyzed")
+    except Exception as e:
+        await ctx.reply(f"❌ Image analysis failed: `{e}`")
+
+
+@bot.command(name="analyzepdf")
+async def analyze_pdf_command(ctx: commands.Context):
+    """
+    Analyze an attached PDF (offer doc, deck, script, etc.)
+    """
+    if not ctx.message.attachments:
+        await ctx.reply("Attach a PDF and run `!analyzepdf`.")
+        return
+
+    pdf = None
+    for att in ctx.message.attachments:
+        if att.filename.lower().endswith(".pdf"):
+            pdf = att
+            break
+        if att.content_type == "application/pdf":
+            pdf = att
+            break
+
+    if not pdf:
+        await ctx.reply("I don't see a PDF attachment. Try again with a .pdf file.")
+        return
+
+    await ctx.reply("📄 Reading and analyzing your PDF...")
+
+    try:
+        data = await pdf.read()
+        analysis = await analyze_pdf_bytes(data, pdf.filename)
+        await ctx.reply(analysis)
+        await increment_stat("stats:pdfs_analyzed")
+    except Exception as e:
+        await ctx.reply(f"❌ PDF analysis failed: `{e}`")
+
+
+# ========= AUDIO PROCESSING =========
+
+AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".ogg", ".oga", ".webm", ".mp4")
 
 
 def is_audio_attachment(att: discord.Attachment) -> bool:
     if att.content_type and att.content_type.startswith("audio/"):
         return True
-    # Fallback by extension
-    audio_exts = (".mp3", ".m4a", ".wav", ".ogg", ".flac", ".webm", ".mka")
-    return att.filename.lower().endswith(audio_exts)
+    fname = att.filename.lower()
+    return fname.endswith(AUDIO_EXTENSIONS)
 
 
-# ------------------------
-# Bot Events & Commands
-# ------------------------
-
-@bot.event
-async def on_ready():
-    logger.info("🤖 Bot ready – logged in as %s", bot.user)
-    # No need to scan redis; memory is looked up lazily.
-
-
-@bot.command(name="ping")
-async def ping(ctx: commands.Context):
-    await ctx.reply("Pong!")
-
-
-@bot.command(name="start")
-async def start(ctx: commands.Context):
+async def process_audio_message(message: discord.Message, user_id: int):
     """
-    Create (or find) the user's personal AI thread.
-    After this, they talk to the bot *only in that thread* with no commands.
+    Handle audio uploads / mobile voice messages inside the user's AI thread.
     """
-    if not isinstance(ctx.channel, discord.TextChannel):
-        await ctx.reply("Please run `!start` in a server text channel, not in a thread/DM.")
-        return
+    for att in message.attachments:
+        if not is_audio_attachment(att):
+            continue
 
-    thread = await get_or_create_user_thread(ctx.channel, ctx.author)
+        await message.channel.send("🎧 Received audio. Transcribing your call...")
 
-    await ctx.reply(
-        f"✅ Created / found your private AI thread: {thread.mention}\n"
-        f"Chat with me there – no command needed."
-    )
-
-    # Greet in the thread
-    greeting = (
-        f"Hey {ctx.author.mention}! 👋\n"
-        "This is your personal Derek AI thread.\n"
-        "- Just type messages and I'll reply.\n"
-        "- Send audio call recordings here and I'll transcribe + analyze them.\n"
-        "- Use `!image <prompt>` (in any channel) for image generation."
-    )
-    await thread.send(greeting)
-
-
-@bot.command(name="image")
-async def image(ctx: commands.Context, *, prompt: str):
-    """
-    Generate an image using gpt-image-1 and send it.
-    """
-    try:
-        await ctx.reply("🎨 Generating image, one sec...")
-        async with ctx.channel.typing():
-            img_bytes = await generate_image_bytes(prompt)
-
-        file = discord.File(BytesIO(img_bytes), filename="image.png")
-        await ctx.send(file=file)
-    except Exception as e:
-        logger.exception("Image generation failed")
-        await ctx.send(f"❌ Image generation failed: `{e}`")
-
-
-async def handle_text_message_in_ai_thread(message: discord.Message):
-    """
-    Handle normal text message inside a user's AI thread.
-    """
-    user = message.author
-    channel = message.channel  # this is a Thread
-    content = message.content.strip()
-    if not content:
-        return
-
-    # Get (or create) OpenAI thread id for this user
-    openai_thread_id = await get_user_openai_thread_id(user)
-
-    async with channel.typing():
         try:
-            # Sales / marketing focused assistant; your Assistant's instructions handle persona.
-            openai_thread_id, reply = await chat_with_assistant(
-                openai_thread_id,
-                content,
-                OPENAI_ASSISTANT_ID,
+            audio_bytes = await att.read()
+            audio_file = io.BytesIO(audio_bytes)
+            audio_file.name = att.filename
+
+            transcription = client_openai.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=audio_file,
             )
-            await set_user_openai_thread_id(user, openai_thread_id)
+            text = transcription.text
+
+            await message.channel.send("📝 Transcription complete. Analyzing now...")
+
+            analysis = await analyze_audio_transcript(text)
+            await message.channel.send(analysis)
+
+            # Update memory & analytics
+            await update_user_memory(user_id, text)
+            await increment_stat("stats:audio_items_analyzed")
         except Exception as e:
-            logger.exception("Error talking to OpenAI")
-            await channel.send(f"⚠️ Error talking to the AI: `{e}`")
-            return
+            await message.channel.send(f"⚠️ Error processing audio: `{e}`")
 
-    # Send reply in safe chunks
-    for chunk in split_message(reply):
-        await channel.send(chunk)
+        # Only process first audio attachment for now
+        break
 
 
-async def handle_audio_in_ai_thread(message: discord.Message, attachment: discord.Attachment):
-    """
-    When a user posts an audio file in their AI thread:
-    - Download
-    - Transcribe
-    - Ask the assistant to analyze the sales/setting/marketing call
-    - Include red-flag detection in the analysis
-    """
-    channel = message.channel
-    user = message.author
-
-    await channel.send("🎵 Received audio. Transcribing your call...")
-
-    try:
-        audio_bytes = await download_attachment(attachment)
-    except Exception as e:
-        logger.exception("Error downloading audio")
-        await channel.send(f"⚠️ Could not download the audio file: `{e}`")
-        return
-
-    try:
-        async with channel.typing():
-            transcript = await transcribe_audio(audio_bytes, attachment.filename)
-    except Exception as e:
-        logger.exception("Error transcribing audio")
-        await channel.send(f"⚠️ Error during transcription: `{e}`")
-        return
-
-    await channel.send("✏️ Transcription complete. Analyzing now...")
-
-    # Build analysis prompt – sales + setter + meta ads + YouTube + organic + Christian coaches
-    analysis_prompt = textwrap.dedent(
-        f"""
-        You are a Christian, high-performance business coach AI helping agency owners and coaches.
-
-        TASK: Analyze the following call transcript (sales, setter, marketing, or coaching call).
-
-        For the analysis, give:
-        1. **Quick summary of the call**
-        2. **What the rep/coach did well** (bullet points)
-        3. **Opportunities to improve**, with specific lines they could have said instead
-        4. **Lead quality assessment** (cold / warm / hot, affluence, decision-making power)
-        5. **Red-flag detector** – list any red flags around:
-           - misaligned values with Christian ethics
-           - poor qualification (money, authority, need, timing)
-           - compliance or policy risks (e.g., Meta ad policy, promises, claims)
-           - bad sales behavior (pressure, manipulation, lying)
-        6. **Concrete action items** for the next 3–5 calls.
-
-        IMPORTANT CONTEXT:
-        - The business is focused on Christian agency owners and coaches.
-        - We care about sales, setting, Meta ads, YouTube, organic acquisition, and operations.
-
-        TRANSCRIPT (verbatim):
-        \"\"\"{transcript}\"\"\"
-        """
-    ).strip()
-
-    # Use a *separate* OpenAI thread for audio analysis, but still keyed per user so memory can grow
-    openai_thread_id = await get_user_openai_thread_id(user)
-
-    try:
-        async with channel.typing():
-            openai_thread_id, reply = await chat_with_assistant(
-                openai_thread_id,
-                analysis_prompt,
-                OPENAI_AUDIO_ASSISTANT_ID,
-            )
-            await set_user_openai_thread_id(user, openai_thread_id)
-    except Exception as e:
-        logger.exception("Error analyzing audio")
-        await channel.send(f"⚠️ Error processing audio: `{e}`")
-        return
-
-    # Send summary back in safe chunks
-    header = "✅ Call analysis complete. Here are your insights:\n"
-    chunks = split_message(header + reply)
-    for i, chunk in enumerate(chunks):
-        await channel.send(chunk)
-
+# ========= AUTO-REPLY IN USER THREAD =========
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Let commands (like !start, !image) run first
+    # Let commands run first
     await bot.process_commands(message)
 
-    # Ignore bot's own messages
     if message.author.bot:
         return
 
-    # 1) Only auto-respond inside a dedicated user AI thread
-    if isinstance(message.channel, discord.Thread):
-        # Check if this thread belongs to the author
-        stored_thread_id = await memory_store.get(key_user_thread(message.author.id))
-        if stored_thread_id and int(stored_thread_id) == message.channel.id:
-            # If there is an audio attachment – prioritize audio analysis
-            audio_attachments = [a for a in message.attachments if is_audio_attachment(a)]
-            if audio_attachments:
-                await handle_audio_in_ai_thread(message, audio_attachments[0])
-            else:
-                await handle_text_message_in_ai_thread(message)
+    # Check if this channel is a mapped AI thread for this user
+    user_thread_id = await get_user_discord_thread(message.author.id)
+    if not user_thread_id or message.channel.id != user_thread_id:
+        return
+
+    # Ignore explicit commands inside the thread
+    if message.content.startswith("!"):
+        return
+
+    # If there is audio attached, treat as call analysis
+    if message.attachments and any(is_audio_attachment(att) for att in message.attachments):
+        await process_audio_message(message, message.author.id)
+        return
+
+    # Otherwise, treat as normal chat to the Assistant
+    text = message.content.strip()
+    if not text and not message.attachments:
+        return  # nothing to send
+
+    await message.channel.typing()
+
+    openai_thread_id = await get_or_create_openai_thread(message.author.id)
+
+    # If user attached non-audio files without using specific commands,
+    # just mention the available tools.
+    if message.attachments and not text:
+        await message.channel.send(
+            "📎 I see a file. For images use `!analyzeimage` with the image attached, "
+            "and for PDFs use `!analyzepdf` with the PDF attached.\n"
+            "For now I'll ignore the file and just wait for your next message."
+        )
+        return
+
+    try:
+        reply = await run_assistant(openai_thread_id, text)
+        # Shorten if needed
+        if len(reply) > 1900:
+            reply = reply[:1900] + "\n\n_(truncated)_"
+        await message.channel.send(reply)
+
+        # Update memory & analytics
+        await update_user_memory(message.author.id, text)
+        await increment_stat("stats:messages_handled")
+    except Exception as e:
+        await message.channel.send(f"⚠️ Error talking to the AI: `{e}`")
 
 
-# ------------------------
-# Run the bot
-# ------------------------
+# ========= RUN =========
 
 if __name__ == "__main__":
-    try:
-        bot.run(DISCORD_TOKEN)
-    finally:
-        # Clean up redis connection on shutdown
-        asyncio.run(memory_store.close())
+    bot.run(DISCORD_TOKEN)
