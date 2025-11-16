@@ -337,21 +337,20 @@ async def create_asana_project_for_user(user: discord.User, onboarding: Dict[str
     project_name = f"{user.display_name} – Coaching Program"
 
     payload = {
-        payload = {
-    "data": {
-        "name": project_name,
-        "include": [
-            "notes",
-            "assignee",
-            "task_notes",
-            "task_dates",
-            "task_projects",
-            "task_subtasks",
-            "task_tags",
-            "task_followers",
-            "task_attachments"
-        ],
-        "schedule_dates": True
+        "data": {
+            "name": project_name,
+            "include": [
+                "notes",
+                "assignee",
+                "task_notes",
+                "task_dates",
+                "task_projects",
+                "task_subtasks",
+                "task_tags",
+                "task_followers",
+                "task_attachments"
+            ],
+            "schedule_dates": True
     }
 }
 
