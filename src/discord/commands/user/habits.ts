@@ -1,97 +1,91 @@
-import { ChatInputCommandInteraction, SlashCommandBuilder } from 'discord.js';
-import { addHabit, listHabits, completeHabit, habitStats } from '../../../services/coaching/habits';
-import { successEmbed, errorEmbed, toReplyOptions } from '../../../utils/embeds';
+import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
+import { getUserHabits, addHabit, completeHabit, getHabitStats } from "../../../services/coaching/habits";
 
 export const data = new SlashCommandBuilder()
-  .setName('habits')
-  .setDescription('Manage your execution habits')
-  .addSubcommand((sub) =>
+  .setName("habits")
+  .setDescription("Track, list, or complete habits")
+  .addSubcommand(sub =>
     sub
-      .setName('add')
-      .setDescription('Add a new habit')
-      .addStringOption((opt) =>
-        opt.setName('description').setDescription('Habit description').setRequired(true)
-      )
-      .addStringOption((opt) =>
-        opt
-          .setName('frequency')
-          .setDescription('Frequency')
-          .addChoices(
-            { name: 'Daily', value: 'daily' },
-            { name: 'Weekly', value: 'weekly' },
-            { name: 'Custom', value: 'custom' }
-          )
-          .setRequired(true)
-      )
+      .setName("list")
+      .setDescription("Show all habits")
   )
-  .addSubcommand((sub) =>
-    sub.setName('list').setDescription('List your current habits')
-  )
-  .addSubcommand((sub) =>
+  .addSubcommand(sub =>
     sub
-      .setName('complete')
-      .setDescription('Mark a habit as completed for today')
-      .addStringOption((opt) =>
-        opt.setName('habit_id').setDescription('Habit ID').setRequired(true)
+      .setName("add")
+      .setDescription("Add a new habit")
+      .addStringOption(opt =>
+        opt.setName("name").setDescription("Habit name").setRequired(true)
       )
   )
-  .addSubcommand((sub) =>
-    sub.setName('stats').setDescription('View your habit completion stats')
+  .addSubcommand(sub =>
+    sub
+      .setName("complete")
+      .setDescription("Mark a habit as done")
+      .addStringOption(opt =>
+        opt.setName("name").setDescription("Habit name").setRequired(true)
+      )
+  )
+  .addSubcommand(sub =>
+    sub
+      .setName("stats")
+      .setDescription("View habit streaks and stats")
   );
 
 export async function execute(interaction: ChatInputCommandInteraction) {
-  const sub = interaction.options.getSubcommand();
   const userId = interaction.user.id;
+  const sub = interaction.options.getSubcommand();
 
-  if (sub === 'add') {
-    const description = interaction.options.getString('description', true);
-    const frequency = interaction.options.getString('frequency', true) as
-      | 'daily'
-      | 'weekly'
-      | 'custom';
-    const habit = await addHabit(userId, description, frequency);
-    await interaction.reply(
-      toReplyOptions(
-        successEmbed(
-          'Habit added',
-          `ID: \`${habit.id}\`\nDescription: **${habit.description}**\nFrequency: ${habit.frequency}`
-        )
-      )
-    );
-  } else if (sub === 'list') {
-    const data = await listHabits(userId);
-    if (data.habits.length === 0) {
-      await interaction.reply(toReplyOptions(successEmbed('No habits yet', 'Add one with `/habits add`.')));
-      return;
+  await interaction.reply({
+    content: `⏳ Processing **${sub}**...`,
+    ephemeral: true
+  });
+
+  try {
+    switch (sub) {
+      case "list": {
+        const habits = await getUserHabits(userId);
+
+        return interaction.editReply({
+          content:
+            habits && Object.keys(habits).length > 0
+              ? `📋 **Your Habits:**\n` +
+                Object.keys(habits)
+                  .map(h => `• ${h}`)
+                  .join("\n")
+              : "📭 You have no habits yet."
+        });
+      }
+
+      case "add": {
+        const name = interaction.options.getString("name", true);
+        await addHabit(userId, name);
+
+        return interaction.editReply({
+          content: `➕ Added new habit: **${name}**`
+        });
+      }
+
+      case "complete": {
+        const name = interaction.options.getString("name", true);
+        await completeHabit(userId, name);
+
+        return interaction.editReply({
+          content: `✔ Completed **${name}** for today!`
+        });
+      }
+
+      case "stats": {
+        const stats = await getHabitStats(userId);
+
+        return interaction.editReply({
+          content: `📈 **Habit Stats:**\n\`\`\`${JSON.stringify(stats, null, 2)}\`\`\``
+        });
+      }
     }
-    const fields = data.habits.map((h) => ({
-      name: `${h.description} (${h.frequency})`,
-      value: `ID: \`${h.id}\``
-    }));
-    await interaction.reply({
-      embeds: [successEmbed('Your habits', 'Here are your current habits:', { fields })],
-      ephemeral: true
-    });
-  } else if (sub === 'complete') {
-    const habitId = interaction.options.getString('habit_id', true);
-    await completeHabit(userId, habitId);
-    await interaction.reply(
-      toReplyOptions(successEmbed('Nice work', `Marked habit \`${habitId}\` as completed for today.`))
-    );
-  } else if (sub === 'stats') {
-    const [habits, stats] = await Promise.all([listHabits(userId), habitStats(userId)]);
-    if (habits.habits.length === 0) {
-      await interaction.reply(toReplyOptions(successEmbed('No habits yet', 'Add one with `/habits add`.')));
-      return;
-    }
-    const fields = habits.habits.map((h) => ({
-      name: h.description,
-      value: `ID: \`${h.id}\`\nCompletions: **${stats[h.id] || 0}**`
-    }));
-    await interaction.reply({
-      embeds: [successEmbed('Habit stats', 'Completions per habit:', { fields })],
-      ephemeral: true
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply({
+      content: "❌ Error handling habit command."
     });
   }
 }
-
