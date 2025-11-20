@@ -14,10 +14,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const userId = interaction.user.id;
   const profile = await memory.getProfile(userId);
   if (!profile) {
-    await interaction.reply({
-      embeds: [errorEmbed('No profile', 'Run `/start` first.')],
-      ephemeral: true
-    });
+    await interaction.reply({ content: "⏳ Generating marketing assets...", ephemeral: true });
+
     return;
   }
 
@@ -26,10 +24,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   const result = await handleMindsetMessage(userId, issue);
 
-  await interaction.editReply({
-    content: result.slice(0, 2000),
-    embeds: [],
-    ephemeral: true
-  });
+  await interaction.editReply({ content: result });
+
 }
 
