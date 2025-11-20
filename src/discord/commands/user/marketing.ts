@@ -45,6 +45,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       '\n```'
   );
 
-  await interaction.editReply({ content: result });
+  const output = await generateMarketing(userId); // or whatever function returns copy
+  
+  await interaction.editReply({ content: output });
 }
 
