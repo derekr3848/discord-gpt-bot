@@ -44,17 +44,16 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     switch (sub) {
       case "list": {
         const habits = await getUserHabits(userId);
-
+      
         return interaction.editReply({
           content:
-            habits && Object.keys(habits).length > 0
+            habits.habits.length > 0
               ? `📋 **Your Habits:**\n` +
-                Object.keys(habits)
-                  .map(h => `• ${h}`)
-                  .join("\n")
+                habits.habits.map(h => `• ${h.description}`).join("\n")
               : "📭 You have no habits yet."
         });
       }
+
 
       case "add": {
         const name = interaction.options.getString("name", true);
