@@ -6,4 +6,4 @@ export const redis = createClient({
   password: env.REDIS_PASSWORD
 });
 
-redis.connect().catch(console.error);
+redis.connect();
