@@ -23,6 +23,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply({ ephemeral: true });
 
   const result = await handleMindsetMessage(userId, issue);
+  const response = await generateMindsetResponse(userId, text);
 
   await interaction.editReply({ content: mindset });
 
