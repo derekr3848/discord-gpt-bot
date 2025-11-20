@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from 'discord.js';
 import { handleMindsetMessage } from '../../../services/coaching/mindset';
-import { memory } from '../../../services/memory';
+import { memory } from "../../../memory";
 import { errorEmbed } from '../../../utils/embeds';
 
 export const data = new SlashCommandBuilder()
