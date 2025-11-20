@@ -1,7 +1,7 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from 'discord.js';
 import { startIntake, getIntakeState, INTAKE_QUESTIONS, updateIntakeState, finalizeIntake } from '../../../services/coaching/intake';
 import { successEmbed, errorEmbed, toReplyOptions } from '../../../utils/embeds';
-import { memory } from '../../../services/memory';
+import { memory } from "../../../memory";
 
 export const data = new SlashCommandBuilder()
   .setName('start')
