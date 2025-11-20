@@ -1,5 +1,5 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
-import { isAdmin } from "../../services/admin/adminAuth";
+import { isAdmin } from "../../../services/admin/adminAuth";
 import { resetUserMemory, runMarketing, runSalesReview, rebuildOffer, generateWeeklyPlan } from "../../services/admin/adminActionsService";
 
 export const data = new SlashCommandBuilder()
