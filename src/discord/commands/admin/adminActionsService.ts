@@ -1,4 +1,4 @@
-import { redis } from "../../memory/redisClient";
+import { redis } from "../../../memory/redisClient";
 
 export async function resetUserMemory(userId: string) {
   const keys = await redis.keys(`user:${userId}:*`);
