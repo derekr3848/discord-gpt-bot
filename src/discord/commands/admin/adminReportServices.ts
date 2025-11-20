@@ -1,4 +1,4 @@
-import { redis } from "../../memory/redisClient";
+import { redis } from "../../../memory/redisClient";
 
 export async function getEngagementReport() {
   const keys = await redis.keys("user:*:habits");
