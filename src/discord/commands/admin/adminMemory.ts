@@ -1,90 +1,105 @@
-import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
+import {
+  ChatInputCommandInteraction,
+  SlashCommandBuilder
+} from "discord.js";
+
 import { isAdmin } from "../../../services/admin/adminAuth";
-import { getUserMemory, setUserMemoryKey, deleteUserMemoryKey } from "../../../services/admin/adminMemoryService";
+import {
+  getUserMemory,
+  setUserMemory,
+  deleteUserMemory
+} from "../../../services/admin/adminMemoryService";
 
 export const data = new SlashCommandBuilder()
   .setName("admin_memory")
   .setDescription("Inspect or modify user memory")
-  .addSubcommand(sub =>
-    sub.setName("get")
-      .setDescription("Retrieve a memory key for a user")
-      .addStringOption(o => o.setName("user_id").setDescription("Target user").setRequired(true))
-      .addStringOption(o => o.setName("key").setDescription("Memory key").setRequired(true))
+  .addSubcommand((sub) =>
+    sub
+      .setName("get")
+      .setDescription("Read a key from user memory")
+      .addStringOption((opt) =>
+        opt.setName("user").setDescription("Target user ID").setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt.setName("key").setDescription("Memory key").setRequired(true)
+      )
   )
-  .addSubcommand(sub =>
-    sub.setName("set")
-      .setDescription("Set a memory key for a user")
-      .addStringOption(o => o.setName("user_id").setDescription("Target user").setRequired(true))
-      .addStringOption(o => o.setName("key").setDescription("Memory key").setRequired(true))
-      .addStringOption(o => o.setName("value").setDescription("Value to set").setRequired(true))
+  .addSubcommand((sub) =>
+    sub
+      .setName("set")
+      .setDescription("Write a value in user memory")
+      .addStringOption((opt) =>
+        opt.setName("user").setDescription("Target user ID").setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt.setName("key").setDescription("Memory key").setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt.setName("value").setDescription("Value (JSON)").setRequired(true)
+      )
   )
-  .addSubcommand(sub =>
-    sub.setName("delete")
-      .setDescription("Delete a memory key for a user")
-      .addStringOption(o => o.setName("user_id").setDescription("Target user").setRequired(true))
-      .addStringOption(o => o.setName("key").setDescription("Memory key").setRequired(true))
+  .addSubcommand((sub) =>
+    sub
+      .setName("delete")
+      .setDescription("Delete a key from memory")
+      .addStringOption((opt) =>
+        opt.setName("user").setDescription("Target user ID").setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt.setName("key").setDescription("Memory key").setRequired(true)
+      )
   );
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   if (!isAdmin(interaction)) {
     return interaction.reply({
-      content: "🚫 Not authorized.",
+      content: "🚫 Unauthorized.",
       ephemeral: true
     });
   }
 
   const sub = interaction.options.getSubcommand();
-  const userId = interaction.options.getString("user_id", true);
+  const userId = interaction.options.getString("user", true);
+  const key = interaction.options.getString("key", true);
 
   await interaction.reply({
-    content: `⏳ Processing memory command \`${sub}\`...`,
+    content: `⏳ Processing memory request...`,
     ephemeral: true
   });
 
   try {
-    switch (sub) {
-      case "get": {
-        const key = interaction.options.getString("key", true);
-        const value = await getUserMemory(userId, key);
+    if (sub === "get") {
+      const value = await getUserMemory(userId);
+      return interaction.editReply({
+        content: `📄 **Memory Dump for ${userId}**\n\`\`\`json\n${JSON.stringify(
+          value,
+          null,
+          2
+        )}\n\`\`\``
+      });
+    }
 
-        await interaction.editReply({
-          content: `📦 **Memory for <@${userId}>**\n\`${key}\` → \`\`\`${JSON.stringify(value, null, 2)}\`\`\``
-        });
-        break;
-      }
+    if (sub === "set") {
+      const valueRaw = interaction.options.getString("value", true);
+      const parsed = JSON.parse(valueRaw);
+      await setUserMemory(userId, key, parsed);
 
-      case "set": {
-        const key = interaction.options.getString("key", true);
-        const value = interaction.options.getString("value", true);
+      return interaction.editReply({
+        content: `✅ Updated memory key \`${key}\` for user **${userId}**`
+      });
+    }
 
-        await setUserMemoryKey(userId, key, value);
+    if (sub === "delete") {
+      await deleteUserMemory(userId, key);
 
-        await interaction.editReply({
-          content: `✅ **Updated memory key**\n${key} → \`${value}\``
-        });
-        break;
-      }
-
-      case "delete": {
-        const key = interaction.options.getString("key", true);
-
-        await deleteUserMemoryKey(userId, key);
-
-        await interaction.editReply({
-          content: `🗑 **Deleted memory key**\n${key}`
-        });
-        break;
-      }
-
-      default:
-        await interaction.editReply({
-          content: "❌ Unknown memory command."
-        });
+      return interaction.editReply({
+        content: `🗑 Deleted memory key \`${key}\` for user **${userId}**`
+      });
     }
   } catch (err) {
     console.error(err);
-    await interaction.editReply({
-      content: "❌ Error processing memory request."
+    return interaction.editReply({
+      content: `❌ Memory operation failed.`
     });
   }
 }
