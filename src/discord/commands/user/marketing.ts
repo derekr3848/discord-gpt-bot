@@ -29,10 +29,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const userId = interaction.user.id;
   const profile = await memory.getProfile(userId);
   if (!profile) {
-    await interaction.reply({
-      embeds: [errorEmbed('No profile', 'Run `/start` first so I understand your business.')],
-      ephemeral: true
-    });
+    await interaction.reply({ content: "⏳ Generating marketing assets...", ephemeral: true });
     return;
   }
 
@@ -48,6 +45,6 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       '\n```'
   );
 
-  await interaction.editReply({ embeds: [embed] });
+  await interaction.editReply({ content: result });
 }
 
