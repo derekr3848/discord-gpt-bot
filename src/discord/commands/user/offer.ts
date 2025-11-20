@@ -21,14 +21,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   if (sub === 'start') {
     const state = await startOfferWizard(userId);
     const q = getCurrentOfferQuestion(state);
-    await interaction.reply(
-      toReplyOptions(
-        successEmbed(
-          'Offer builder started',
-          `I’ll DM you questions.\n\nFirst:\n**${q?.question}**`
-        )
-      )
-    );
+    await interaction.reply({ content: "Working on offer...", ephemeral: true });
+
     const dm = await interaction.user.createDM();
     await dm.send('**Offer Builder Wizard**\n\nQ1: ' + q?.question);
   } else if (sub === 'status') {
