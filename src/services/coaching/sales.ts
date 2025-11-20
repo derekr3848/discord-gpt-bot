@@ -2,7 +2,7 @@ import { memory } from '../memory';
 import { chatCompletion } from '../openaiClient';
 import { salesReviewPrompt } from '../prompts';
 import { nowISO } from '../../utils/time';
-import { redis } from '../redisClient';
+import { redis } from '../memory/redisClient';
 
 export async function analyzeSalesCall(userId: string, transcript: string): Promise<string> {
   const [profile, offer] = await Promise.all([
