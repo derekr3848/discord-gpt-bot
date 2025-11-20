@@ -7,8 +7,10 @@ import { redis } from '../../memory/redisClient';
 export async function addHabit(
   userId: string,
   description: string,
-  frequency: 'daily' | 'weekly' | 'custom'
+  frequency: 'daily' | 'weekly' | 'custom' = 'daily'
 ): Promise<Habit> {
+
+
   const habitsState = (await memory.getHabits(userId)) || { userId, habits: [] };
   const habit: Habit = {
     id: uuid(),
