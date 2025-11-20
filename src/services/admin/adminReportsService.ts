@@ -15,3 +15,8 @@ export async function getStageReport() {
     keys,
   };
 }
+
+export async function getStuckUsersReport() {
+  return "Stub: no stuck users report generated yet.";
+}
+
