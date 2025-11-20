@@ -1,122 +1,54 @@
-import {
-  ChatInputCommandInteraction,
-  SlashCommandBuilder
-} from "discord.js";
+import { memory } from '../../memory/memory';
+import { Habit, UserHabits } from '../../utils/types';
+import { nowISO } from '../../utils/time';
+import { v4 as uuid } from 'uuid';
+import { redis } from '../../memory/redisClient';
 
-import {
-  addHabit,
-  listHabits,
-  completeHabit,
-  habitStats
-} from "../../../services/coaching/habits";
+export async function addHabit(
+  userId: string,
+  description: string,
+  frequency: 'daily' | 'weekly' | 'custom'
+): Promise<Habit> {
+  const habitsState = (await memory.getHabits(userId)) || { userId, habits: [] };
+  const habit: Habit = {
+    id: uuid(),
+    description,
+    frequency,
+    createdAt: nowISO(),
+    updatedAt: nowISO()
+  };
+  habitsState.habits.push(habit);
+  await memory.setHabits(userId, habitsState);
+  return habit;
+}
 
-export const data = new SlashCommandBuilder()
-  .setName("habits")
-  .setDescription("Manage your execution habits")
-  .addSubcommand((sub) =>
-    sub
-      .setName("add")
-      .setDescription("Add a new habit")
-      .addStringOption((opt) =>
-        opt
-          .setName("description")
-          .setDescription("Describe the habit")
-          .setRequired(true)
-      )
-      .addStringOption((opt) =>
-        opt
-          .setName("frequency")
-          .setDescription("How often?")
-          .addChoices(
-            { name: "Daily", value: "daily" },
-            { name: "Weekly", value: "weekly" },
-            { name: "Custom", value: "custom" }
-          )
-          .setRequired(true)
-      )
-  )
-  .addSubcommand((sub) =>
-    sub.setName("list").setDescription("Show all habits")
-  )
-  .addSubcommand((sub) =>
-    sub
-      .setName("complete")
-      .setDescription("Mark a habit complete for today")
-      .addStringOption((opt) =>
-        opt.setName("id").setDescription("Habit ID").setRequired(true)
-      )
-  )
-  .addSubcommand((sub) =>
-    sub.setName("stats").setDescription("Show habit statistics")
-  );
+export async function getUserHabits(userId: string): Promise<UserHabits> {
+  return (await memory.getHabits(userId)) || { userId, habits: [] };
+}
 
-export async function execute(interaction: ChatInputCommandInteraction) {
-  const userId = interaction.user.id;
-  const sub = interaction.options.getSubcommand();
-
-  await interaction.reply({
-    content: "Processing...",
-    ephemeral: true
-  });
-
-  try {
-    if (sub === "add") {
-      const description = interaction.options.getString("description", true);
-      const frequency = interaction.options.getString("frequency", true) as
-        | "daily"
-        | "weekly"
-        | "custom";
-
-      const habit = await addHabit(userId, description, frequency);
-
-      return interaction.editReply({
-        content: `📝 Added new habit:\n\`${habit.description}\``
-      });
+export async function completeHabit(userId: string, habitId: string): Promise<void> {
+  const date = nowISO().split('T')[0];
+  await memory.logHabitCompletion(userId, habitId, date);
+  const habitsState = await memory.getHabits(userId);
+  if (habitsState) {
+    const habit = habitsState.habits.find((h: Habit) => h.id === habitId);
+    if (habit) {
+      habit.updatedAt = nowISO();
+      await memory.setHabits(userId, habitsState);
     }
-
-    if (sub === "list") {
-      const habits = await listHabits(userId);
-      if (!habits.habits.length) {
-        return interaction.editReply({ content: "No habits yet." });
-      }
-
-      const formatted = habits.habits
-        .map((h) => `• **${h.description}** → \`${h.id}\``)
-        .join("\n");
-
-      return interaction.editReply({
-        content: `📋 **Your Habits:**\n${formatted}`
-      });
-    }
-
-    if (sub === "complete") {
-      const habitId = interaction.options.getString("id", true);
-      await completeHabit(userId, habitId);
-
-      return interaction.editReply({
-        content: `🔥 Marked complete for today!`
-      });
-    }
-
-    if (sub === "stats") {
-      const stats = await habitStats(userId);
-
-      if (Object.keys(stats).length === 0) {
-        return interaction.editReply({
-          content: "No habit stats yet."
-        });
-      }
-
-      const formatted = Object.entries(stats)
-        .map(([id, count]) => `• \`${id}\`: **${count} completions**`)
-        .join("\n");
-
-      return interaction.editReply({
-        content: `📊 **Habit Stats:**\n${formatted}`
-      });
-    }
-  } catch (error) {
-    console.error(error);
-    return interaction.editReply("❌ Error processing command.");
   }
+}
+
+export async function getHabitStats(userId: string): Promise<Record<string, number>> {
+  const habitsState = await memory.getHabits(userId);
+  if (!habitsState) return {};
+  const stats: Record<string, number> = {};
+
+  for (const habit of habitsState.habits) {
+    const key = `user:${userId}:habit_logs:${habit.id}`;
+    const count = await redis.scard(key);
+    stats[habit.id] = count;
+  }
+
+  return stats;
 }
