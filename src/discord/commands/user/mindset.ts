@@ -14,7 +14,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const userId = interaction.user.id;
   const profile = await memory.getProfile(userId);
   if (!profile) {
-    await interaction.reply({ content: "⏳ Generating marketing assets...", ephemeral: true });
+    await interaction.reply({ content: "Processing...", ephemeral: true });
 
     return;
   }
@@ -24,7 +24,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   const result = await handleMindsetMessage(userId, issue);
 
-  await interaction.editReply({ content: result });
+  await interaction.editReply({ content: mindset });
 
 }
 
