@@ -1,12 +1,9 @@
-import Redis from 'ioredis';
-import { env } from '../config/env';
-import { log } from './logger';
+import { createClient } from "redis";
+import { env } from "../config/env";
 
-export const redis = new Redis(env.REDIS_URL, {
-  password: env.REDIS_PASSWORD,
-  maxRetriesPerRequest: 3
+export const redis = createClient({
+  url: env.REDIS_URL,
+  password: env.REDIS_PASSWORD
 });
 
-redis.on('connect', () => log.info('Connected to Redis'));
-redis.on('error', (err) => log.error('Redis error', err));
-
+redis.connect().catch(console.error);
