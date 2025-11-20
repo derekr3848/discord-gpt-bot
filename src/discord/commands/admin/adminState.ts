@@ -1,154 +1,145 @@
-import { ChatInputCommandInteraction, SlashCommandBuilder, User } from 'discord.js';
-import { isAdminInteraction } from '../../../services/admin/adminAuth';
-import { memory } from '../../../services/memory';
-import { successEmbed, errorEmbed, adminAuditFooter } from '../../../utils/embeds';
-import { logAdminAction } from '../../../services/admin/adminLog';
-import { setPushModeState } from '../../../services/coaching/pushmode';
-import { setStage } from '../../../services/coaching/roadmap';
+import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
+import { isAdmin } from "../../../services/admin/adminAuth";
+import {
+  resetAllUserData,
+  setUserStage,
+  updateUserProfileField,
+  toggleUserPushMode
+} from "../../../services/admin/adminStateService";
 
 export const data = new SlashCommandBuilder()
-  .setName('admin_state')
-  .setDescription('Admin controls: reset user, set stage, update profile, toggle pushmode')
-  .addSubcommand((sub) =>
+  .setName("admin_state")
+  .setDescription("Control and modify user state directly")
+
+  // Reset ALL user data
+  .addSubcommand(sub =>
     sub
-      .setName('reset_user')
-      .setDescription('Reset all or part of user state')
-      .addUserOption((opt) => opt.setName('user').setDescription('Target user').setRequired(true))
-      .addStringOption((opt) =>
-        opt
-          .setName('scope')
-          .setDescription('What to reset')
+      .setName("reset")
+      .setDescription("Reset all memory and roadmap for a user")
+      .addStringOption(o =>
+        o.setName("user_id").setDescription("Target user ID").setRequired(true)
+      )
+  )
+
+  // Direct stage setting
+  .addSubcommand(sub =>
+    sub
+      .setName("set_stage")
+      .setDescription("Override user roadmap stage")
+      .addStringOption(o =>
+        o.setName("user_id").setDescription("Target user ID").setRequired(true)
+      )
+      .addStringOption(o =>
+        o.setName("stage").setDescription("Stage to set").setRequired(true)
+      )
+  )
+
+  // Push mode override
+  .addSubcommand(sub =>
+    sub
+      .setName("toggle_pushmode")
+      .setDescription("Force enable or disable push mode for a user")
+      .addStringOption(o =>
+        o.setName("user_id").setDescription("Target user ID").setRequired(true)
+      )
+      .addStringOption(o =>
+        o
+          .setName("state")
+          .setDescription("on | off")
           .addChoices(
-            { name: 'All', value: 'all' },
-            { name: 'Roadmap', value: 'roadmap' },
-            { name: 'Habits', value: 'habits' },
-            { name: 'Profile', value: 'profile' },
-            { name: 'Pushmode', value: 'pushmode' },
-            { name: 'Mindset', value: 'mindset' },
-            { name: 'Offer', value: 'offer' }
+            { name: "on", value: "on" },
+            { name: "off", value: "off" }
           )
           .setRequired(true)
       )
   )
-  .addSubcommand((sub) =>
+
+  // Edit profile field
+  .addSubcommand(sub =>
     sub
-      .setName('set_stage')
-      .setDescription('Force set user roadmap stage')
-      .addUserOption((opt) => opt.setName('user').setDescription('Target user').setRequired(true))
-      .addStringOption((opt) =>
-        opt.setName('stage_id').setDescription('Stage ID').setRequired(true)
+      .setName("update_profile")
+      .setDescription("Edit a user's profile field")
+      .addStringOption(o =>
+        o.setName("user_id").setDescription("Target user ID").setRequired(true)
       )
-  )
-  .addSubcommand((sub) =>
-    sub
-      .setName('toggle_pushmode')
-      .setDescription('Force toggle user push mode')
-      .addUserOption((opt) => opt.setName('user').setDescription('Target user').setRequired(true))
-      .addBooleanOption((opt) =>
-        opt.setName('enabled').setDescription('Enable?').setRequired(true)
+      .addStringOption(o =>
+        o.setName("field").setDescription("Profile field to update").setRequired(true)
       )
-      .addStringOption((opt) =>
-        opt
-          .setName('level')
-          .setDescription('Level')
-          .addChoices(
-            { name: 'Normal', value: 'normal' },
-            { name: 'Strong', value: 'strong' },
-            { name: 'Extreme', value: 'extreme' }
-          )
+      .addStringOption(o =>
+        o.setName("value").setDescription("New value").setRequired(true)
       )
   );
 
 export async function execute(interaction: ChatInputCommandInteraction) {
-  if (!isAdminInteraction(interaction)) {
-    await interaction.reply({ embeds: [errorEmbed('Forbidden', 'Admin only.')], ephemeral: true });
-    return;
+  if (!isAdmin(interaction)) {
+    return interaction.reply({
+      content: "🚫 You do not have admin privileges.",
+      ephemeral: true
+    });
   }
 
   const sub = interaction.options.getSubcommand();
-  const actorId = interaction.user.id;
+  const userId = interaction.options.getString("user_id", true);
 
-  if (sub === 'reset_user') {
-    const user = interaction.options.getUser('user', true);
-    const scope = interaction.options.getString('scope', true);
+  await interaction.reply({
+    content: `⏳ Executing **${sub}** for <@${userId}>...`,
+    ephemeral: true
+  });
 
-    const keys: string[] = [];
-    if (scope === 'all' || scope === 'profile') keys.push(`user:${user.id}:profile`);
-    if (scope === 'all' || scope === 'roadmap') keys.push(`user:${user.id}:roadmap`);
-    if (scope === 'all' || scope === 'habits') keys.push(`user:${user.id}:habits`, `user:${user.id}:habit_logs:*`);
-    if (scope === 'all' || scope === 'pushmode') keys.push(`user:${user.id}:pushmode`);
-    if (scope === 'all' || scope === 'mindset') keys.push(`user:${user.id}:mindset`);
-    if (scope === 'all' || scope === 'offer') keys.push(`user:${user.id}:offer`);
+  try {
+    switch (sub) {
+      case "reset": {
+        await resetAllUserData(userId);
 
-    // delete simple keys; habit_logs:* would require scan but we keep simple here
-    for (const k of keys) {
-      if (k.includes('*')) continue;
-      await memory.del(k);
-    }
-
-    const logId = await logAdminAction({
-      actorId,
-      targetUserId: user.id,
-      action: `reset_user:${scope}`,
-      diff: { keysDeleted: keys }
-    });
-
-    const embed = successEmbed(
-      'Update Successful',
-      `**User:** <@${user.id}>\n**Action:** Reset User → ${scope}`,
-      {
-        footer: adminAuditFooter(logId)
+        await interaction.editReply({
+          content: `🧹 **All data reset for <@${userId}>**\nRoadmap, habits, memory cleared.`
+        });
+        break;
       }
-    );
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-  } else if (sub === 'set_stage') {
-    const user = interaction.options.getUser('user', true);
-    const stageId = interaction.options.getString('stage_id', true);
 
-    const roadmap = await setStage(user.id, stageId);
-    if (!roadmap) {
-      await interaction.reply({
-        embeds: [errorEmbed('Error', 'Roadmap or stage not found.')],
-        ephemeral: true
-      });
-      return;
+      case "set_stage": {
+        const stage = interaction.options.getString("stage", true);
+        await setUserStage(userId, stage);
+
+        await interaction.editReply({
+          content: `📍 **Stage updated**\n<@${userId}> is now in stage **${stage}**`
+        });
+        break;
+      }
+
+      case "toggle_pushmode": {
+        const state = interaction.options.getString("state", true);
+        const enabled = state === "on";
+
+        await toggleUserPushMode(userId, enabled);
+
+        await interaction.editReply({
+          content: `🔥 **Push mode ${enabled ? "enabled" : "disabled"}** for <@${userId}>`
+        });
+        break;
+      }
+
+      case "update_profile": {
+        const field = interaction.options.getString("field", true);
+        const value = interaction.options.getString("value", true);
+
+        await updateUserProfileField(userId, field, value);
+
+        await interaction.editReply({
+          content: `📝 **Profile updated**\n\`${field}\` → \`${value}\``
+        });
+        break;
+      }
+
+      default:
+        await interaction.editReply({
+          content: "❌ Unknown admin state command."
+        });
     }
-
-    const logId = await logAdminAction({
-      actorId,
-      targetUserId: user.id,
-      action: 'set_stage',
-      diff: { currentStageId: roadmap.currentStageId }
+  } catch (err) {
+    console.error(err);
+    await interaction.editReply({
+      content: "❌ Failed to execute admin command."
     });
-
-    const embed = successEmbed(
-      'Update Successful',
-      `**User:** <@${user.id}>\n**Action:** Set Stage → ${stageId}\n**Changed:** user:${user.id}:roadmap.current_stage`,
-      { footer: adminAuditFooter(logId) }
-    );
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-  } else if (sub === 'toggle_pushmode') {
-    const user = interaction.options.getUser('user', true);
-    const enabled = interaction.options.getBoolean('enabled', true);
-    const level = (interaction.options.getString('level') || 'normal') as
-      | 'normal'
-      | 'strong'
-      | 'extreme';
-
-    const state = await setPushModeState(user.id, enabled, level);
-    const logId = await logAdminAction({
-      actorId,
-      targetUserId: user.id,
-      action: 'toggle_pushmode',
-      diff: state
-    });
-
-    const embed = successEmbed(
-      'Update Successful',
-      `**User:** <@${user.id}>\n**Action:** Toggle Pushmode → ${state.enabled ? 'ON' : 'OFF'} (${state.level})\n**Changed:** user:${user.id}:pushmode`,
-      { footer: adminAuditFooter(logId) }
-    );
-    await interaction.reply({ embeds: [embed], ephemeral: true });
   }
 }
-
