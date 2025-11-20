@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from 'discord.js';
 import { analyzeSalesCall } from '../../../services/coaching/sales';
-import { memory } from '../../../services/memory';
+import { memory } from "../../../memory";
 import { errorEmbed } from '../../../utils/embeds';
 
 export const data = new SlashCommandBuilder()
