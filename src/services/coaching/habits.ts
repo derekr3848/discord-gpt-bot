@@ -2,7 +2,7 @@ import { memory } from '../memory';
 import { Habit, UserHabits } from '../../utils/types';
 import { nowISO } from '../../utils/time';
 import { v4 as uuid } from 'uuid';
-import { redis } from '../redisClient';
+import { redis } from '../memory/redisClient';
 
 export async function addHabit(
   userId: string,
