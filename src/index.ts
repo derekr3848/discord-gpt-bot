@@ -1,119 +1,65 @@
-import { Events, Message } from 'discord.js';
-import { startDiscordClient, client } from './discord/client';
-import { handleInteraction } from './discord/interactions';
-import { handleIntakeAnswer, completeIntakeFlow } from './discord/commands/user/start';
-import { handleOfferAnswer, completeOfferWizard } from './discord/commands/user/offer';
-import { log } from './services/logger';
-import { memory } from './services/memory';
-import { redis } from './services/redisClient';
-import { coachingSystemPrompt } from './services/prompts';
-import { chatCompletion } from './services/openaiClient';
+import {
+  Client,
+  GatewayIntentBits,
+  Collection,
+  Events,
+  Interaction
+} from "discord.js";
 
-async function main() {
-  client.on(Events.InteractionCreate, async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-    try {
-      await handleInteraction(interaction);
-    } catch (err) {
-      log.error('Interaction error', err);
-      if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({
-          content: 'Something went wrong. Please try again.',
-          ephemeral: true
-        });
-      } else {
-        await interaction.reply({
-          content: 'Something went wrong. Please try again.',
-          ephemeral: true
-        });
-      }
-    }
-  });
+import { env } from "./config/env";
+import { isAdmin } from "./services/admin/adminAuth";
+import { loadCommands } from "./discord/loadCommands";
 
-  client.on(Events.MessageCreate, async (message: Message) => {
-    // Ignore bot messages
-    if (message.author.bot) return;
+console.log(`[BOOT] Starting Ave Crux AI Coach in ${env.NODE_ENV} mode...`);
 
-    // Only DM flows
-    if (message.channel.type !== 1) return; // 1 = DMChannel in discord.js v14
-
-    const userId = message.author.id;
-    const content = message.content.trim();
-
-    // Check intake flow
-    const intakeStateRaw = await redis.get(`user:${userId}:intake_state`);
-    if (intakeStateRaw) {
-      const res = await handleIntakeAnswer(userId, content);
-      if (!res) return;
-      if (res.done) {
-        await message.channel.send('Thanks! Let me analyze your answers and build your roadmap...');
-        const { profile, roadmap, diagnosisText } = await completeIntakeFlow(
-          userId,
-          message.author.username
-        );
-        await memory.appendHistory(userId, 'assistant', diagnosisText);
-        await message.channel.send(
-          '**Diagnosis & Plan**\n\n' +
-            diagnosisText.slice(0, 6000) +
-            '\n\nYou can now use `/plan`, `/offer`, `/marketing`, etc.'
-        );
-      } else {
-        await message.channel.send(`Next question:\n**${res.nextQuestion?.question}**`);
-      }
-      return;
-    }
-
-    // Check offer wizard flow
-    const offerStateRaw = await redis.get(`user:${userId}:offer_state`);
-    if (offerStateRaw) {
-      const res = await handleOfferAnswer(userId, content);
-      if (!res) return;
-      if (res.done) {
-        await message.channel.send('Great, let me synthesize your offer...');
-        const { offer, raw } = await completeOfferWizard(userId);
-        await memory.appendHistory(userId, 'assistant', raw);
-        await message.channel.send(
-          `**Offer built:** ${offer.offerName}\n\nPromise: ${offer.promise}\n\nUnique mechanism: ${offer.uniqueMechanism}`
-        );
-      } else {
-        await message.channel.send(`Next question:\n**${res.nextQuestion?.question}**`);
-      }
-      return;
-    }
-
-    // General coaching DM: use memory-based personalization
-    const [profile, roadmap, pushmode, offer, tone, faithMode] = await Promise.all([
-      memory.getProfile(userId),
-      memory.getRoadmap(userId),
-      memory.getPushMode(userId),
-      memory.getOffer(userId),
-      redis.get('config:tone'),
-      redis.get('config:faith_mode')
-    ]);
-
-    const system = coachingSystemPrompt({
-      profile,
-      roadmap,
-      pushMode: pushmode,
-      offer,
-      globalTone: tone,
-      globalFaithMode: (faithMode as any) || 'user'
-    });
-
-    await memory.appendHistory(userId, 'user', content);
-
-    const reply = await chatCompletion(system, content, { maxTokens: 1200 });
-
-    await memory.appendHistory(userId, 'assistant', reply);
-
-    await message.channel.send(reply.slice(0, 2000));
-  });
-
-  await startDiscordClient();
-}
-
-main().catch((err) => {
-  log.error('Fatal error', err);
-  process.exit(1);
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages
+  ]
 });
 
+// Attach commands to client
+client.commands = new Collection();
+loadCommands(client);
+
+// Ready event
+client.once(Events.ClientReady, (c) => {
+  console.log(`🤖 Logged in as ${c.user.tag}`);
+});
+
+// Command router
+client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const command = client.commands.get(interaction.commandName);
+  if (!command) {
+    return interaction.reply({
+      content: "❌ Command not implemented.",
+      ephemeral: true
+    });
+  }
+
+  try {
+    await command.execute(interaction);
+  } catch (err) {
+    console.error(err);
+
+    // Only reply if not already replied
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: "❌ An error occurred while executing this command.",
+        ephemeral: true
+      });
+    } else {
+      await interaction.editReply({
+        content: "❌ Command failed."
+      });
+    }
+  }
+});
+
+// Start bot
+client.login(env.DISCORD_BOT_TOKEN);
