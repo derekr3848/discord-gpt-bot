@@ -1,4 +1,4 @@
-import { redis } from "../../memory/redisClient";
+import { redis } from "../../../memory/redisClient";
 
 export async function getUserMemory(userId: string, key: string) {
   return await redis.json.get(`user:${userId}:${key}`);
