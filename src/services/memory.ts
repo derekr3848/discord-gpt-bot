@@ -1,4 +1,4 @@
-import { redis } from './redisClient';
+import { redis } from "../memory/redisClient";
 import {
   UserProfile,
   UserRoadmap,
