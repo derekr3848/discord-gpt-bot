@@ -25,27 +25,40 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   });
 
   try {
-    switch (sub) {
-      case "engagement":
-        const engagement = await getEngagementReport();
-        await interaction.editReply({ content: engagement });
-        break;
-
-      case "stages":
-        const stages = await getStageReport();
-        await interaction.editReply({ content: stages });
-        break;
-
-      case "stuck_users":
-        const stuck = await getStuckUsersReport();
-        await interaction.editReply({ content: stuck });
-        break;
-
-      default:
-        await interaction.editReply({
-          content: "❌ Unknown report type."
-        });
+   switch (sub) {
+    case "engagement": {
+      const engagement = await getEngagementReport();
+  
+      await interaction.editReply({
+        content: `📊 **Engagement Report**\n• Users tracking habits: **${engagement.usersTrackingHabits}**`
+      });
+      break;
     }
+  
+    case "stages": {
+      const stages = await getStageReport();
+  
+      await interaction.editReply({
+        content: `📍 **Stage Report**\n• Users with roadmaps: **${stages.usersWithRoadmaps}**`
+      });
+      break;
+    }
+  
+    case "stuck_users": {
+      const stuck = await getStuckUsersReport();
+  
+      await interaction.editReply({
+        content: `⚠ **Stuck Users**\n${Array.isArray(stuck) ? stuck.join("\n") : stuck}`
+      });
+      break;
+    }
+  
+    default:
+      await interaction.editReply({
+        content: "❌ Unknown report type."
+      });
+  }
+
   } catch (err) {
     console.error(err);
     await interaction.editReply({
