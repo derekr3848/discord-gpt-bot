@@ -1,7 +1,7 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
 import { generateMarketingAssets } from "../../../services/coaching/marketing";
 import { successEmbed, errorEmbed } from "../../../utils/embeds";
-import { memory } from "../../../memory";
+import { memory } from "../../memory";
 
 export const data = new SlashCommandBuilder()
   .setName("marketing")
