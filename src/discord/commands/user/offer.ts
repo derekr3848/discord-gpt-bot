@@ -26,7 +26,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     const dm = await interaction.user.createDM();
     await dm.send('**Offer Builder Wizard**\n\nQ1: ' + q?.question);
   } else if (sub === 'status') {
-    const offer = await (await import('../../../services/memory')).memory.getOffer(userId);
+    const { memory } = await import("../../../memory");
+    const offer = await memory.getOffer(userId);
     if (!offer) {
       await interaction.reply(
         toReplyOptions(errorEmbed('No offer yet', 'Run `/offer start` to build one.'))
