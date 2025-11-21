@@ -1,11 +1,11 @@
-import { env } from '../config/env';
-
 export function nowISO(): string {
   return new Date().toISOString();
 }
 
-export function formatTimestamp(date: Date = new Date()): string {
-  // simple UTC string; you can adjust to env.TIMEZONE using a tz lib if you want
-  return date.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+export function formatTimestampForDisplay(date = new Date()): string {
+  // You’re in America/Chicago; we’ll label it CST/CDT generically
+  return date.toLocaleString('en-US', {
+    timeZone: 'America/Chicago',
+    hour12: false
+  }) + ' CST';
 }
-
