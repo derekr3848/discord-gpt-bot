@@ -1,5 +1,5 @@
 import { REST, Routes } from "discord.js";
-import { env } from "../config/env";
+import { env } from "./config/env";
 import fs from "fs";
 import path from "path";
 
@@ -35,14 +35,12 @@ const rest = new REST({ version: "10" }).setToken(env.DISCORD_BOT_TOKEN);
     console.log(`📦 Registering ${commands.length} slash commands...`);
 
     if (env.NODE_ENV === "development" && env.DISCORD_GUILD_ID) {
-      // GUILD (fast registration)
       await rest.put(
         Routes.applicationGuildCommands(env.DISCORD_CLIENT_ID, env.DISCORD_GUILD_ID),
         { body: commands }
       );
       console.log("⚡ Commands registered to DEV guild");
     } else {
-      // GLOBAL (slow propagation)
       await rest.put(
         Routes.applicationCommands(env.DISCORD_CLIENT_ID),
         { body: commands }
