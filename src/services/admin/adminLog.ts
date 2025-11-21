@@ -1,4 +1,5 @@
 import { redis } from "../../memory/redisClient";
+
 import { v4 as uuid } from "uuid";
 
 export async function logAdminAction(data: {
@@ -7,7 +8,9 @@ export async function logAdminAction(data: {
   details?: any;
   invokedBy?: string;
 }) {
-  const logId = uuid();
+  const logId: string = uuid();
+
+
   const timestamp = Date.now();
 
   const payload = {
