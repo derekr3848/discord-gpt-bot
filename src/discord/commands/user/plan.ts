@@ -4,7 +4,7 @@ import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
 import { memory } from "../../../memory";
 
 // FIXED FUNCTION NAME
-import { setUserStage } from "../../../services/coaching/roadmap";
+import { setStage } from "../../../services/coaching/roadmap";
 
 // Keeping embed imports (tell me if you need the file)
 import { successEmbed, errorEmbed, toReplyOptions } from "../../../utils/embeds";
@@ -68,7 +68,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   if (sub === "set_stage") {
     const stageId = interaction.options.getString("stage_id", true);
-    const updated = await setUserStage(userId, stageId);
+    const updated = await setStage(userId, stageId);
 
     if (!updated) {
       return interaction.reply({
