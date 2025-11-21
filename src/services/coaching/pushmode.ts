@@ -12,7 +12,7 @@ export async function setPushModeState(
     level,
     lastUpdated: nowISO()
   };
+
   await memory.setPushMode(userId, state);
   return state;
 }
-
