@@ -6,4 +6,16 @@ export const redis = createClient({
   password: env.REDIS_PASSWORD
 });
 
-redis.connect();
+redis.on("error", (err) => {
+  console.error("[REDIS ERROR]", err);
+});
+
+export async function connectRedis() {
+  if (!redis.isOpen) {
+    await redis.connect();
+    console.log("🔌 Redis Connected");
+  }
+}
+
+// Automatically connect on import
+connectRedis();
