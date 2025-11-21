@@ -29,16 +29,18 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const userId = interaction.user.id;
   const roadmap = await memory.getRoadmap(userId);
 
-  if (!roadmap) {
-    return interaction.reply({
+ if (!roadmap) {
+  return interaction.reply({
     embeds: [
-      successEmbed(
-        "Stage Updated",
-        `You are now on stage: **${updated.currentStageId}**`
+      errorEmbed(
+        "No roadmap found",
+        "You must run `/start` before using roadmap commands."
       )
     ],
     ephemeral: true
   });
+}
+
 
   }
 
