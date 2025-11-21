@@ -31,14 +31,15 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   if (!roadmap) {
     return interaction.reply({
-      embeds: [
-        errorEmbed(
-          "No roadmap yet",
-          "I need to onboard you first. Run `/start` to begin intake."
-        )
-      ],
-      ephemeral: true
-    });
+    embeds: [
+      successEmbed(
+        "Stage Updated",
+        `You are now on stage: **${updated.currentStageId}**`
+      )
+    ],
+    ephemeral: true
+  });
+
   }
 
   if (sub === "view") {
