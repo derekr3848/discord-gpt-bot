@@ -52,4 +52,14 @@ export const memory = {
   async logHabitCompletion(userId: string, habitId: string, date: string) {
     return redis.sAdd(`user:${userId}:habit_logs:${habitId}`, date);
   }
+
+  // OFFER STORAGE
+  async getOffer(userId: string) {
+    return redis.json.get(`user:${userId}:offer`);
+  }
+  
+  async setOffer(userId: string, offer: any) {
+    return redis.json.set(`user:${userId}:offer`, "$", offer);
+  }
+
 };
