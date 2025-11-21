@@ -6,7 +6,7 @@ export const redis = createClient({
   password: env.REDIS_PASSWORD
 });
 
-redis.on("error", (err) => {
+redis.on("error", (err: Error) => {
   console.error("[REDIS ERROR]", err);
 });
 
