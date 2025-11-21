@@ -1,31 +1,37 @@
-import { ChatInputCommandInteraction, SlashCommandBuilder } from 'discord.js';
-import { handleMindsetMessage } from '../../../services/coaching/mindset';
+import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
+import { handleMindsetMessage, generateMindsetResponse } from "../../../services/coaching/mindset";
 import { memory } from "../../../memory";
-import { errorEmbed } from '../../../utils/embeds';
+import { errorEmbed } from "../../../utils/embeds";
 
 export const data = new SlashCommandBuilder()
-  .setName('mindset')
-  .setDescription('Mindset & identity-level support')
-  .addStringOption((opt) =>
-    opt.setName('issue').setDescription('What are you struggling with?').setRequired(true)
+  .setName("mindset")
+  .setDescription("Mindset & identity-level support")
+  .addStringOption(opt =>
+    opt.setName("issue").setDescription("What are you struggling with?").setRequired(true)
   );
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   const userId = interaction.user.id;
   const profile = await memory.getProfile(userId);
-  if (!profile) {
-    await interaction.reply({ content: "Processing...", ephemeral: true });
 
-    return;
+  if (!profile) {
+    return interaction.reply({
+      content: "⚠ Please complete onboarding first using `/start`.",
+      ephemeral: true
+    });
   }
 
-  const issue = interaction.options.getString('issue', true);
-  await interaction.deferReply({ ephemeral: true });
+  const issue = interaction.options.getString("issue", true);
 
-  const result = await handleMindsetMessage(userId, issue);
-  const response = await generateMindsetResponse(userId, text);
+  await interaction.reply({ content: "⏳ Processing...", ephemeral: true });
 
-  await interaction.editReply({ content: mindset });
+  // Process mindset logic
+  await handleMindsetMessage(userId, issue);
 
+  // Generate natural language response
+  const response = await generateMindsetResponse(userId, issue);
+
+  return interaction.editReply({
+    content: response
+  });
 }
-
