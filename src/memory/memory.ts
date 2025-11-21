@@ -1,23 +1,35 @@
 import { redis } from "./redisClient";
 
 export const memory = {
+  // ==========================
+  // GENERIC RAW ACCESS
+  // ==========================
+  async setRaw(key: string, value: string) {
+    return redis.set(key, value);
+  },
+
+  async getRaw(key: string) {
+    return redis.get(key);
+  },
+
+  async del(key: string) {
+    return redis.del(key);
+  },
+
+  // ==========================
+  // PROFILE
+  // ==========================
   async getProfile(userId: string) {
     return redis.json.get(`user:${userId}:profile`);
   },
-
-  async getOffer(userId: string) {
-  return redis.json.get(`user:${userId}:offer`);
-  },
-  
-  async setOffer(userId: string, offer: any) {
-    return redis.json.set(`user:${userId}:offer`, "$", offer);
-  },
-
 
   async setProfile(userId: string, profile: any) {
     return redis.json.set(`user:${userId}:profile`, "$", profile);
   },
 
+  // ==========================
+  // ROADMAP
+  // ==========================
   async getRoadmap(userId: string) {
     return redis.json.get(`user:${userId}:roadmap`);
   },
@@ -26,6 +38,9 @@ export const memory = {
     return redis.json.set(`user:${userId}:roadmap`, "$", roadmap);
   },
 
+  // ==========================
+  // HABITS
+  // ==========================
   async getHabits(userId: string) {
     return redis.json.get(`user:${userId}:habits`);
   },
