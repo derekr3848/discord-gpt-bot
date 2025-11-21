@@ -69,25 +69,26 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     });
   }
 
-  if (sub === "set_stage") {
+    if (sub === "set_stage") {
     const stageId = interaction.options.getString("stage_id", true);
     const updated = await setStage(userId, stageId);
-
+  
     if (!updated) {
       return interaction.reply({
         embeds: [errorEmbed("Stage not found", `Stage ID \`${stageId}\` not found.`)],
         ephemeral: true
       });
     }
-
+  
     return interaction.reply({
       embeds: [
         successEmbed(
           "Stage Updated",
-          `You are now on stage: **${updated.current_stage ?? updated.currentStageId}**`
+          `You are now on stage: **${updated.currentStageId}**`
         )
       ],
       ephemeral: true
     });
+
   }
 }
