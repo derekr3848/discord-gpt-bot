@@ -1,4 +1,5 @@
-import { memory } from "../memory";
+import { memory } from "../../memory";
+
 import { Habit, UserHabits } from '../../utils/types';
 import { nowISO } from '../../utils/time';
 import { v4 as uuid } from 'uuid';
