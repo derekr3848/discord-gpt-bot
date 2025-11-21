@@ -2,20 +2,22 @@
   "name": "ave-crux-ai-coach",
   "version": "1.0.0",
   "main": "dist/index.js",
+  "license": "MIT",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "register-commands": "ts-node src/commands/registerSlashCommands.ts"
+    "register-commands": "ts-node src/registerCommands.ts"
   },
   "dependencies": {
-    "discord.js": "^14.16.3",
-    "openai": "^4.75.0",
+    "discord.js": "^14.15.3",
+    "dotenv": "^16.4.5",
     "ioredis": "^5.4.1",
-    "zod": "^3.23.8"
+    "openai": "^4.58.1",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
-    "@types/node": "^22.9.0",
+    "@types/node": "^22.5.4",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.6.3"
