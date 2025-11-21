@@ -60,6 +60,17 @@ export const memory = {
   
   async setOffer(userId: string, offer: any) {
     return redis.json.set(`user:${userId}:offer`, "$", offer);
+  },
+
+  // MINDSET STORAGE
+// ==========================
+
+  async getMindset(userId: string) {
+    return redis.json.get(`user:${userId}:mindset`);
+  },
+  
+  async setMindset(userId: string, mindset: any) {
+    return redis.json.set(`user:${userId}:mindset`, "$", mindset);
   }
 
 };
