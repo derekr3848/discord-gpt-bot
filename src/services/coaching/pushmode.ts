@@ -1,4 +1,4 @@
-import { memory } from '../memory';
+import { memory } from '../../memory';
 import { PushModeState } from '../../utils/types';
 import { nowISO } from '../../utils/time';
 
