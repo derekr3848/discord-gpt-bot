@@ -1,4 +1,4 @@
-import { memory } from '../memory';
+import { memory } from '../../memory';
 import { chatCompletion } from '../openaiClient';
 import { intakeDiagnosisPrompt, roadmapGenerationPrompt } from '../prompts';
 import { UserProfile, UserRoadmap } from '../../utils/types';
