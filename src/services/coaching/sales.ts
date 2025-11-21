@@ -1,4 +1,4 @@
-import { memory } from '../memory';
+import { memory } from '../../memory';
 import { chatCompletion } from '../openaiClient';
 import { salesReviewPrompt } from '../prompts';
 import { nowISO } from '../../utils/time';
@@ -26,9 +26,9 @@ export async function analyzeSalesCall(userId: string, transcript: string): Prom
     transcriptSnippet: transcript.slice(0, 500),
     feedback: result
   };
-  await redis.lpush(key, JSON.stringify(entry));
-  await redis.ltrim(key, 0, 20);
+
+  await redis.lPush(key, JSON.stringify(entry));
+  await redis.lTrim(key, 0, 20);
 
   return result;
 }
-
