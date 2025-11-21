@@ -16,15 +16,16 @@ export async function handleMindsetMessage(userId: string, message: string): Pro
 
   const faith = profile?.faithPreference ?? "off";
 
-  const completion = await chatCompletion({
-    system: "You are a business mindset coach (not a therapist).",
-    messages: mindsetPrompt({
+  const completion = await chatCompletion(
+    "You are a business mindset coach (not a therapist).",
+    mindsetPrompt({
       message,
       profile,
       faithPreference: faith
     }),
-    maxTokens: 900
-  });
+    { maxTokens: 900 }
+  );
+
 
   // Log trend + notes
   ms.themes.push(message.slice(0, 100));
