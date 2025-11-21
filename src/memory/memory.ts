@@ -5,6 +5,15 @@ export const memory = {
     return redis.json.get(`user:${userId}:profile`);
   },
 
+  async getOffer(userId: string) {
+  return redis.json.get(`user:${userId}:offer`);
+  },
+  
+  async setOffer(userId: string, offer: any) {
+    return redis.json.set(`user:${userId}:offer`, "$", offer);
+  },
+
+
   async setProfile(userId: string, profile: any) {
     return redis.json.set(`user:${userId}:profile`, "$", profile);
   },
