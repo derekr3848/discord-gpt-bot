@@ -17,5 +17,4 @@ export async function connectRedis() {
   }
 }
 
-// Automatically connect on import
 connectRedis();
