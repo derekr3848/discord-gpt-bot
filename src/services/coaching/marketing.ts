@@ -1,4 +1,4 @@
-import { memory } from '../memory';
+import { memory } from '../../memory';
 import { chatCompletion } from '../openaiClient';
 import { marketingAssetsPrompt } from '../prompts';
 
