@@ -1,8 +1,8 @@
-import { memory } from '../../memory';
-import { chatCompletion } from '../openaiClient';
-import { salesReviewPrompt } from '../prompts';
-import { nowISO } from '../../utils/time';
-import { redis } from '../../memory/redisClient';
+import { memory } from "../../memory";
+import { chatCompletion } from "../openaiClient";
+import { salesReviewPrompt } from "../prompts";
+import { nowISO } from "../../utils/time";
+import { redis } from "../../memory/redisClient";
 
 export async function analyzeSalesCall(userId: string, transcript: string): Promise<string> {
   const [profile, offer] = await Promise.all([
@@ -10,16 +10,17 @@ export async function analyzeSalesCall(userId: string, transcript: string): Prom
     memory.getOffer(userId)
   ]);
 
-  const result = await chatCompletion(
-    'You are an expert sales coach.',
-    salesReviewPrompt({
+  const result = await chatCompletion({
+    system: "You are an expert sales coach.",
+    messages: salesReviewPrompt({
       transcript,
       profile,
       offer
     }),
-    { maxTokens: 1800 }
-  );
+    maxTokens: 1800
+  });
 
+  // Store summary in Redis list
   const key = `user:${userId}:sales_reviews`;
   const entry = {
     ts: nowISO(),
@@ -27,8 +28,9 @@ export async function analyzeSalesCall(userId: string, transcript: string): Prom
     feedback: result
   };
 
-  await redis.lPush(key, JSON.stringify(entry));
-  await redis.lTrim(key, 0, 20);
+  // ioredis commands are lowercase
+  await redis.lpush(key, JSON.stringify(entry));
+  await redis.ltrim(key, 0, 20);
 
   return result;
 }
