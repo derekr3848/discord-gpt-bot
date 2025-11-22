@@ -19,7 +19,7 @@ export async function logAdminAction(data: {
     ...data
   };
 
-  await redis.json.set(`admin:logs:${logId}`, "$", payload);
+  await redis.set(`admin:logs:${logId}`, JSON.stringify(payload));
 
   return logId;
 }
