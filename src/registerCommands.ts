@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { REST, Routes } from "discord.js";
-import { env } from "./config/env.ts";
+import { env } from "./config/env";
 import fs from "fs";
 import path from "path";
 
