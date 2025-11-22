@@ -6,6 +6,7 @@ import {
   Interaction
 } from "discord.js";
 
+import { REST, Routes } from "discord.js";
 import { env } from "./config/env";
 import { isAdmin } from "./services/admin/adminAuth";
 import { loadCommands } from "./discord/loadCommands";
@@ -25,9 +26,26 @@ const client = new Client({
 client.commands = new Collection();
 loadCommands(client);
 
+// Register commands with Discord
+async function registerCommands(client: any) {
+  const rest = new REST({ version: "10" }).setToken(env.DISCORD_BOT_TOKEN);
+
+  console.log("📡 Registering slash commands...");
+
+  const commands = client.commands.map((cmd: any) => cmd.data.toJSON());
+
+  await rest.put(
+    Routes.applicationCommands(env.DISCORD_CLIENT_ID),
+    { body: commands }
+  );
+
+  console.log("✅ Slash commands registered");
+}
+
 // Ready event
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Logged in as ${c.user.tag}`);
+  await registerCommands(client);
 });
 
 // Command router
@@ -47,10 +65,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   } catch (err) {
     console.error(err);
 
-    // Only reply if not already replied
     if (!interaction.replied && !interaction.deferred) {
       await interaction.reply({
-        content: "❌ An error occurred while executing this command.",
+        content: "❌ Error running command.",
         ephemeral: true
       });
     } else {
