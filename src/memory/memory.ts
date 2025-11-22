@@ -20,57 +20,63 @@ export const memory = {
   // PROFILE
   // ==========================
   async getProfile(userId: string) {
-    return redis.json.get(`user:${userId}:profile`);
+    const raw = await redis.get(`user:${userId}:profile`);
+    return raw ? JSON.parse(raw) : null;
   },
 
   async setProfile(userId: string, profile: any) {
-    return redis.json.set(`user:${userId}:profile`, "$", profile);
+    return redis.set(`user:${userId}:profile`, JSON.stringify(profile));
   },
 
   // ==========================
   // ROADMAP
   // ==========================
   async getRoadmap(userId: string) {
-    return redis.json.get(`user:${userId}:roadmap`);
+    const raw = await redis.get(`user:${userId}:roadmap`);
+    return raw ? JSON.parse(raw) : null;
   },
 
   async setRoadmap(userId: string, roadmap: any) {
-    return redis.json.set(`user:${userId}:roadmap`, "$", roadmap);
+    return redis.set(`user:${userId}:roadmap`, JSON.stringify(roadmap));
   },
 
   // ==========================
   // HABITS
   // ==========================
   async getHabits(userId: string) {
-    return redis.json.get(`user:${userId}:habits`);
+    const raw = await redis.get(`user:${userId}:habits`);
+    return raw ? JSON.parse(raw) : null;
   },
 
   async setHabits(userId: string, habits: any) {
-    return redis.json.set(`user:${userId}:habits`, "$", habits);
+    return redis.set(`user:${userId}:habits`, JSON.stringify(habits));
   },
 
   async logHabitCompletion(userId: string, habitId: string, date: string) {
-    return redis.sAdd(`user:${userId}:habit_logs:${habitId}`, date);
+    return redis.sadd(`user:${userId}:habit_logs:${habitId}`, date);
   },
 
-  // OFFER STORAGE
+  // ==========================
+  // OFFER
+  // ==========================
   async getOffer(userId: string) {
-    return redis.json.get(`user:${userId}:offer`);
+    const raw = await redis.get(`user:${userId}:offer`);
+    return raw ? JSON.parse(raw) : null;
   },
-  
+
   async setOffer(userId: string, offer: any) {
-    return redis.json.set(`user:${userId}:offer`, "$", offer);
+    return redis.set(`user:${userId}:offer`, JSON.stringify(offer));
   },
 
-  // MINDSET STORAGE
-// ==========================
-
+  // ==========================
+  // MINDSET
+  // ==========================
   async getMindset(userId: string) {
-    return redis.json.get(`user:${userId}:mindset`);
+    const raw = await redis.get(`user:${userId}:mindset`);
+    return raw ? JSON.parse(raw) : null;
   },
   
   async setMindset(userId: string, mindset: any) {
-    return redis.json.set(`user:${userId}:mindset`, "$", mindset);
+    return redis.set(`user:${userId}:mindset`, JSON.stringify(mindset));
   }
-
 };
