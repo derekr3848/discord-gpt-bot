@@ -1,12 +1,14 @@
+import "dotenv/config";
 import { REST, Routes } from "discord.js";
 import { env } from "./config/env";
 import fs from "fs";
 import path from "path";
 
 const commands: any[] = [];
-const commandsPath = path.join(__dirname, "commands");
 
-// Load all command JSON
+// 🔥 FIXED PATH
+const commandsPath = path.join(__dirname, "discord/commands");
+
 function loadCommands() {
   const files = getAllFiles(commandsPath);
   for (const file of files) {
@@ -15,8 +17,7 @@ function loadCommands() {
   }
 }
 
-function getAllFiles(dir: string, files?: string[]): string[] {
-  files = files || [];
+function getAllFiles(dir: string, files: string[] = []): string[] {
   for (const file of fs.readdirSync(dir)) {
     const full = path.join(dir, file);
     if (fs.statSync(full).isDirectory()) getAllFiles(full, files);
@@ -27,28 +28,20 @@ function getAllFiles(dir: string, files?: string[]): string[] {
 
 loadCommands();
 
+console.log("📦 Loaded commands:", commands.map(c => c.name));
+
 const rest = new REST({ version: "10" }).setToken(env.DISCORD_BOT_TOKEN);
 
-// Register commands
 (async () => {
   try {
-    console.log(`📦 Registering ${commands.length} slash commands...`);
+    console.log(`📡 Registering ${commands.length} slash commands...`);
 
-    if (env.NODE_ENV === "development" && env.DISCORD_GUILD_ID) {
-      await rest.put(
-        Routes.applicationGuildCommands(env.DISCORD_CLIENT_ID, env.DISCORD_GUILD_ID),
-        { body: commands }
-      );
-      console.log("⚡ Commands registered to DEV guild");
-    } else {
-      await rest.put(
-        Routes.applicationCommands(env.DISCORD_CLIENT_ID),
-        { body: commands }
-      );
-      console.log("🌍 Commands registered globally");
-    }
+    await rest.put(
+      Routes.applicationGuildCommands(env.DISCORD_CLIENT_ID, env.DISCORD_GUILD_ID),
+      { body: commands }
+    );
 
-    console.log("✅ Done");
+    console.log("⚡ Commands registered to DEV guild");
   } catch (err) {
     console.error("❌ Failed to register commands:", err);
   }
