@@ -4,7 +4,7 @@ export const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   DISCORD_BOT_TOKEN: process.env.DISCORD_BOT_TOKEN || '',
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID || '',
-  DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID, // optional, for guild-scoped commands
+  DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID || "",
 
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
   OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
