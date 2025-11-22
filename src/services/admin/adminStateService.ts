@@ -2,9 +2,8 @@ import { redis } from "../../memory/redisClient";
 
 export async function resetAllUserData(userId: string) {
   const keys = await redis.keys(`user:${userId}:*`);
-
   if (keys.length > 0) {
-    await redis.del(keys);
+    await redis.del(...keys);
   }
 
   return { cleared: keys.length };
@@ -16,11 +15,15 @@ export async function updateUserProfileField(
   value: any
 ) {
   const profileKey = `user:${userId}:profile`;
-  const profile = (await redis.json.get(profileKey)) || {};
+  const raw = await redis.get(profileKey);
+
+  // Parse existing JSON or create empty
+  const profile = raw ? JSON.parse(raw) : {};
 
   profile[key] = value;
 
-  await redis.json.set(profileKey, "$", profile);
+  // Store back as JSON
+  await redis.set(profileKey, JSON.stringify(profile));
 
   return profile;
 }
@@ -36,12 +39,14 @@ export async function toggleUserPushMode(userId: string) {
 
 export async function setUserStage(userId: string, stage: string) {
   const key = `user:${userId}:roadmap`;
-  const roadmap = (await redis.json.get(key)) || {};
+  const raw = await redis.get(key);
 
-  roadmap.current_stage = stage;
+  const roadmap = raw ? JSON.parse(raw) : {};
+
+  roadmap.currentStageId = stage;
   roadmap.updatedAt = new Date().toISOString();
 
-  await redis.json.set(key, "$", roadmap);
+  await redis.set(key, JSON.stringify(roadmap));
 
   return roadmap;
 }
