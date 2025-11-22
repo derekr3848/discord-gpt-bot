@@ -35,12 +35,13 @@ async function registerCommands(client: any) {
   const commands = client.commands.map((cmd: any) => cmd.data.toJSON());
 
   await rest.put(
-    Routes.applicationCommands(env.DISCORD_CLIENT_ID),
+    Routes.applicationGuildCommands(env.DISCORD_CLIENT_ID, env.DISCORD_GUILD_ID), 
     { body: commands }
   );
 
-  console.log("✅ Slash commands registered");
+  console.log("⚡ Commands registered to guild:", env.DISCORD_GUILD_ID);
 }
+
 
 // Ready event
 client.once(Events.ClientReady, async (c) => {
