@@ -10,15 +10,16 @@ export async function analyzeSalesCall(userId: string, transcript: string): Prom
     memory.getOffer(userId)
   ]);
 
-  const result = await chatCompletion({
-    system: "You are an expert sales coach.",
-    messages: salesReviewPrompt({
+  const result = await chatCompletion(
+    "You are an expert sales coach.",
+    salesReviewPrompt({
       transcript,
       profile,
       offer
     }),
-    maxTokens: 1800
-  });
+    { maxTokens: 1800 }
+  );
+
 
   // Store summary in Redis list
   const key = `user:${userId}:sales_reviews`;
