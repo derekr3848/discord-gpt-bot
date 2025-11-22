@@ -35,9 +35,10 @@ async function registerCommands(client: any) {
   const commands = client.commands.map((cmd: any) => cmd.data.toJSON());
 
   await rest.put(
-    Routes.applicationGuildCommands(env.DISCORD_CLIENT_ID, env.DISCORD_GUILD_ID), 
-    { body: commands }
-  );
+  Routes.applicationGuildCommands(env.DISCORD_CLIENT_ID!, env.DISCORD_GUILD_ID!), 
+  { body: commands }
+);
+
 
   console.log("⚡ Commands registered to guild:", env.DISCORD_GUILD_ID);
 }
