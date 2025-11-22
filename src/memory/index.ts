@@ -54,9 +54,11 @@ export async function setHabits(userId: string, habits: any) {
   return setRaw(`user:${userId}:habits`, JSON.stringify(habits));
 }
 
+
 export async function logHabitCompletion(userId: string, habitId: string, date: string) {
-  return redis.sAdd(`user:${userId}:habit_logs:${habitId}`, date);
+  return redis.sadd(`user:${userId}:habit_logs:${habitId}`, date);
 }
+
 
 // ---------- MINDSET ----------
 export async function getMindset(userId: string) {
