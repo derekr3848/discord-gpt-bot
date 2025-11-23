@@ -10,7 +10,7 @@ import {
 import { REST, Routes } from "discord.js";
 import { env } from "./config/env";
 import { loadCommands } from "./discord/loadCommands";
-import { handleIntakeAnswer, completeIntakeFlow } from "./discord/commands/start";
+import { handleIntakeAnswer, completeIntakeFlow } from "./discord/commands/user/start";
 
 console.log(`[BOOT] Starting Ave Crux AI Coach in ${env.NODE_ENV} mode...`);
 
