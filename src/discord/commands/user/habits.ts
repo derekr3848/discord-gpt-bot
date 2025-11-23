@@ -1,5 +1,6 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
 import { addHabit, completeHabit, getUserHabits, getHabitStats } from "../../../services/coaching/habits";
+import { MessageFlags } from "discord.js";
 
 export const data = new SlashCommandBuilder()
   .setName("habits")
