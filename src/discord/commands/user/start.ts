@@ -49,10 +49,15 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     });
 
     // Send first question via DM
-    const dm = await interaction.user.createDM();
-    await dm.send(
-      `Hey, I’m Ave Crux AI Coach.\n\nLet's begin.\n\n**Q1:** ${q.question}`
-    );
+  // Create a thread in the same channel the command was run
+    const thread = await interaction.channel?.threads.create({
+      name: `intake-${interaction.user.username}`,
+      autoArchiveDuration: 60,
+      reason: "User onboarding flow"
+    });
+    
+    await thread.send(`Hey ${interaction.user.username}, let’s begin.\n\n**Q1:** ${q.question}`);
+
 
   } catch (err) {
     console.error("❌ ERROR in /start:", err);
