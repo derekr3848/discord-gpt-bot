@@ -10,7 +10,12 @@ import {
 import { REST, Routes } from "discord.js";
 import { env } from "./config/env";
 import { loadCommands } from "./discord/loadCommands";
-import { handleIntakeAnswer, completeIntakeFlow } from "./discord/commands/user/start";
+
+// 👇 Make sure path matches your folder structure
+import {
+  handleIntakeAnswer,
+  completeIntakeFlow
+} from "./discord/commands/start";  // ← NOT user/start.ts unless that's actual path
 
 console.log(`[BOOT] Starting Ave Crux AI Coach in ${env.NODE_ENV} mode...`);
 
@@ -28,17 +33,16 @@ client.commands = new Collection();
 loadCommands(client);
 
 // -----------------------------
-// REGISTER SLASH COMMANDS (GLOBAL)
+// REGISTER SLASH COMMANDS GLOBALLY
 // -----------------------------
 async function registerCommands(client: any) {
   const rest = new REST({ version: "10" }).setToken(env.DISCORD_BOT_TOKEN);
-
   const commands = client.commands.map((cmd: any) => cmd.data.toJSON());
 
   console.log("📡 Registering GLOBAL slash commands...");
 
   await rest.put(
-    Routes.applicationCommands(env.DISCORD_CLIENT_ID), // GLOBAL
+    Routes.applicationCommands(env.DISCORD_CLIENT_ID),
     { body: commands }
   );
 
@@ -46,7 +50,7 @@ async function registerCommands(client: any) {
 }
 
 // -----------------------------
-// BOT READY
+// READY
 // -----------------------------
 client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Logged in as ${c.user.tag}`);
@@ -54,24 +58,19 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 // -----------------------------
-// HANDLE SLASH COMMANDS
+// SLASH COMMAND HANDLER
 // -----------------------------
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const command = client.commands.get(interaction.commandName);
-  if (!command) {
-    return interaction.reply({
-      content: "❌ Command not found.",
-      ephemeral: true
-    });
-  }
+  if (!command)
+    return interaction.reply({ content: "❌ Command not found.", ephemeral: true });
 
   try {
     await command.execute(interaction);
   } catch (err) {
     console.error("❌ Command Execution Error:", err);
-
     if (!interaction.replied && !interaction.deferred) {
       await interaction.reply({
         content: "❌ Error executing command.",
@@ -82,33 +81,25 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 });
 
 // -----------------------------
-// HANDLE DM INTAKE FLOW
+// THREAD-BASED ONBOARDING HANDLER
 // -----------------------------
 client.on(Events.MessageCreate, async (msg: Message) => {
   if (msg.author.bot) return;
 
-  // Only respond to onboarding threads (not DMs, not normal channels)
+  // Only respond to messages inside onboarding threads
   if (!msg.channel.isThread()) return;
-  if (!msg.channel.name.startsWith("intake-")) return; // <-- 🔥 Required
 
   const res = await handleIntakeAnswer(msg.author.id, msg.content);
   if (!res) return;
 
   if (res.done) {
     await msg.reply("🎉 Finalizing your onboarding...");
-
-    const { profile, roadmap, diagnosisText } = await completeIntakeFlow(
-      msg.author.id,
-      msg.author.username
-    );
-
+    await completeIntakeFlow(msg.author.id, msg.author.username);
     await msg.reply("✔ Onboarding complete!");
   } else {
     await msg.reply(`**Next question:** ${res.nextQuestion.question}`);
   }
 });
-
-
 
 // -----------------------------
 // START BOT
