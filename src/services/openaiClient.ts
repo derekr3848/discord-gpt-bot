@@ -12,7 +12,7 @@ export async function chatCompletion(
 ): Promise<string> {
   const res = await openai.chat.completions.create({
     model: env.OPENAI_MODEL,
-    max_tokens: options?.maxTokens ?? 800,
+    max_completion_tokens: options?.maxTokens ?? 800,  // ← Updated
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
@@ -22,4 +22,3 @@ export async function chatCompletion(
   const content = res.choices[0]?.message?.content || '';
   return content.trim();
 }
-
