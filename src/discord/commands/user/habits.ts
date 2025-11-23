@@ -37,7 +37,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   await interaction.reply({
     content: `⏳ Processing **${sub}**...`,
-    ephemeral: true
+  flags: MessageFlags.Ephemeral
   });
 
   try {
