@@ -1,6 +1,8 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from 'discord.js';
 import { setPushModeState } from '../../../services/coaching/pushmode';
 import { successEmbed, toReplyOptions } from '../../../utils/embeds';
+import { MessageFlags } from "discord.js";
+
 
 export const data = new SlashCommandBuilder()
   .setName('pushmode')
