@@ -1,4 +1,4 @@
-
+/*
 import "dotenv/config";
 import { REST, Routes } from "discord.js";
 import { env } from "./config/env";
@@ -51,4 +51,4 @@ const rest = new REST({ version: "10" }).setToken(env.DISCORD_BOT_TOKEN);
     console.error("❌ Failed to register commands:", err);
   }
 })();
-
+*/
