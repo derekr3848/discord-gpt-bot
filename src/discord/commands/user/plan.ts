@@ -1,4 +1,6 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
+import { MessageFlags } from "discord.js";
+
 
 // FIXED PATH
 import { memory } from "../../../memory";
