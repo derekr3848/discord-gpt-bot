@@ -31,7 +31,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   if (!profile) {
     return interaction.reply({
       content: "⚠ You must complete onboarding first. Run `/start`.",
-      ephemeral: true
+  flags: MessageFlags.Ephemeral
     });
   }
 
@@ -40,7 +40,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   await interaction.reply({
     content: "⏳ Generating marketing assets...",
-    ephemeral: true
+  flags: MessageFlags.Ephemeral
   });
 
   try {
