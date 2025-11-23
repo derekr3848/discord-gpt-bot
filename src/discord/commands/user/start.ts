@@ -8,6 +8,8 @@ import {
 } from "../../../services/coaching/intake";
 import { successEmbed, toReplyOptions } from "../../../utils/embeds";
 import { memory } from "../../../memory";
+import { MessageFlags } from "discord.js";
+
 
 export const data = new SlashCommandBuilder()
   .setName("start")
