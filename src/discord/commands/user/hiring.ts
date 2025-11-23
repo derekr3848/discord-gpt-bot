@@ -1,5 +1,6 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
 import { generateJobDescription, generateInterviewQuestions, generateSOP } from "../../../services/coaching/hiring";
+import { MessageFlags } from "discord.js";
 
 export const data = new SlashCommandBuilder()
   .setName("hiring")
