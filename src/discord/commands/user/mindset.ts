@@ -17,7 +17,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   if (!profile) {
     return interaction.reply({
       content: "⚠ Please complete onboarding first using `/start`.",
-      ephemeral: true
+  flags: MessageFlags.Ephemeral
     });
   }
 
