@@ -2,6 +2,8 @@ import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
 import { analyzeSalesCall } from "../../../services/coaching/sales";
 import { memory } from "../../../memory";
 import { errorEmbed } from "../../../utils/embeds";
+import { MessageFlags } from "discord.js";
+
 
 export const data = new SlashCommandBuilder()
   .setName("sales_review")
