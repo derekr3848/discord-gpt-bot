@@ -3,7 +3,12 @@ import path from "path";
 import { Client } from "discord.js";
 
 export function loadCommands(client: Client) {
-  const commandsPath = path.join(__dirname, "commands");
+  /*const commandsPath = path.join(__dirname, "commands");*/
+  const commandsPath =
+  process.env.NODE_ENV === "production"
+    ? path.join(__dirname, "../commands") // compiled JS lives here
+    : path.join(__dirname, "commands");   // TS source when running locally
+
   const commandFiles = getAllFiles(commandsPath);
 
   for (const file of commandFiles) {
