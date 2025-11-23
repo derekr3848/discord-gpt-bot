@@ -37,7 +37,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         "You must run `/start` before using roadmap commands."
       )
     ],
-    ephemeral: true
+  flags: MessageFlags.Ephemeral
   });
 
 
@@ -50,7 +50,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     if (!current) {
       return interaction.reply({
         embeds: [errorEmbed("Error", "Current stage not found in roadmap.")],
-        ephemeral: true
+  flags: MessageFlags.Ephemeral
       });
     }
 
