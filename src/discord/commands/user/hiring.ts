@@ -36,7 +36,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   await interaction.reply({
     content: `⏳ Creating **${role}** hiring docs...`,
-    ephemeral: true
+  flags: MessageFlags.Ephemeral
   });
 
   try {
