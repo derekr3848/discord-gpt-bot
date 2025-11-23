@@ -1,4 +1,4 @@
-/*
+
 import "dotenv/config";
 import { REST, Routes } from "discord.js";
 import { env } from "./config/env";
@@ -8,6 +8,11 @@ import path from "path";
 const commands: any[] = [];
 
 const commandsPath = path.join(__dirname, "discord/commands");
+const commandsPath =
+  process.env.NODE_ENV === "production"
+    ? path.join(__dirname, "discord/commands")
+    : path.join(__dirname, "discord/commands");
+
 
 function loadCommands() {
   const files = getAllFiles(commandsPath);
@@ -46,4 +51,4 @@ const rest = new REST({ version: "10" }).setToken(env.DISCORD_BOT_TOKEN);
     console.error("❌ Failed to register commands:", err);
   }
 })();
-*/
+
