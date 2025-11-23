@@ -21,7 +21,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   if (sub === 'start') {
     const state = await startOfferWizard(userId);
     const q = getCurrentOfferQuestion(state);
-    await interaction.reply({ content: "Working on offer...", ephemeral: true });
+    await interaction.reply({ content: "Working on offer...",  flags: MessageFlags.Ephemeral
+});
 
     const dm = await interaction.user.createDM();
     await dm.send('**Offer Builder Wizard**\n\nQ1: ' + q?.question);
@@ -47,7 +48,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         ]
       }
     );
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    await interaction.reply({ embeds: [embed],  flags: MessageFlags.Ephemeral });
   }
 }
 
