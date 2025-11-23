@@ -86,19 +86,27 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 // -----------------------------
 client.on(Events.MessageCreate, async (msg: Message) => {
   if (msg.author.bot) return;
-  if (msg.guild) return; // only respond to DMs
+
+  // Only respond to onboarding threads
+  if (!msg.channel.isThread()) return;
 
   const res = await handleIntakeAnswer(msg.author.id, msg.content);
   if (!res) return;
 
   if (res.done) {
     await msg.reply("🎉 Finalizing your onboarding...");
-    await completeIntakeFlow(msg.author.id, msg.author.username);
+
+    const { profile, roadmap, diagnosisText } = await completeIntakeFlow(
+      msg.author.id,
+      msg.author.username
+    );
+
     await msg.reply("✔ Onboarding complete!");
   } else {
     await msg.reply(`**Next question:** ${res.nextQuestion.question}`);
   }
 });
+
 
 // -----------------------------
 // START BOT
