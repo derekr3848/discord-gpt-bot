@@ -3,12 +3,12 @@ import path from "path";
 import { Client } from "discord.js";
 
 export function loadCommands(client: Client) {
-  /*const commandsPath = path.join(__dirname, "commands");*/
   const commandsPath =
-  process.env.NODE_ENV === "production"
-    ? path.join(__dirname, "discord/commands") // When bundled in dist
-    : path.join(__dirname, "commands");       // Local dev
+    process.env.NODE_ENV === "production"
+      ? path.join(__dirname, "commands")               // <- Already inside dist/discord
+      : path.join(__dirname, "../discord/commands");   // <- Local dev path
 
+  console.log("[LOAD] Searching commands at:", commandsPath);
 
   const commandFiles = getAllFiles(commandsPath);
 
@@ -26,13 +26,15 @@ export function loadCommands(client: Client) {
   console.log(`[CMD] Loaded ${client.commands.size} commands`);
 }
 
-// Utility to recurse folders
-function getAllFiles(dir: string, files?: string[]): string[] {
-  files = files || [];
+function getAllFiles(dir: string, files: string[] = []): string[] {
   for (const file of fs.readdirSync(dir)) {
     const full = path.join(dir, file);
-    if (fs.statSync(full).isDirectory()) getAllFiles(full, files);
-    else if (full.endsWith(".ts") || full.endsWith(".js")) files.push(full);
+
+    if (fs.statSync(full).isDirectory()) {
+      getAllFiles(full, files);
+    } else if (full.endsWith(".js")) {       // compiled code is JS, not TS
+      files.push(full);
+    }
   }
   return files;
 }
