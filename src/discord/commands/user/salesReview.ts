@@ -20,7 +20,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   if (!profile) {
     return interaction.reply({
       embeds: [errorEmbed("No profile", "Run `/start` first.")],
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
   }
 
