@@ -87,8 +87,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 client.on(Events.MessageCreate, async (msg: Message) => {
   if (msg.author.bot) return;
 
-  // Only respond to onboarding threads
+  // Only respond to onboarding threads (not DMs, not normal channels)
   if (!msg.channel.isThread()) return;
+  if (!msg.channel.name.startsWith("intake-")) return; // <-- 🔥 Required
 
   const res = await handleIntakeAnswer(msg.author.id, msg.content);
   if (!res) return;
@@ -106,6 +107,7 @@ client.on(Events.MessageCreate, async (msg: Message) => {
     await msg.reply(`**Next question:** ${res.nextQuestion.question}`);
   }
 });
+
 
 
 // -----------------------------
